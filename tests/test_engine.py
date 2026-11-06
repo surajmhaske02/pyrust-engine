@@ -51,6 +51,125 @@ def nested(n):
             total += i * j
     return total
 
+@optimize
+def elif_chain(n):
+    if n < 0:
+        return -1
+    elif n == 0:
+        return 0
+    elif n < 10:
+        r = n * 2
+    else:
+        r = n
+    return r
+
+@optimize
+def annotated(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        total += i
+    return total
+
+@optimize
+def divmod_kernel(a, b):
+    return a // b * 1000 + a % b
+
+@optimize
+def stepped(start, stop, step):
+    total = 0
+    for i in range(start, stop, step):
+        total = total * 3 + i
+    return total
+
+@optimize
+def count_range(start, stop, step):
+    count = 0
+    last = 0
+    for i in range(start, stop, step):
+        count += 1
+        last = i
+    return count * 1000 + last % 1000
+
+@optimize
+def logic(a, b):
+    if a and not b:
+        return 1
+    if 0 <= a < b or a == -b:
+        return 2
+    return 3
+
+class NewFeatures(unittest.TestCase):
+    """Features added after the v0.1 review."""
+    def check_native(self, original, argsets):
+        fn = optimize(original.python, fallback=False)
+        for args in argsets:
+            self.assertEqual(fn(*args), original.python(*args), args)
+        self.assertEqual(fn.report()['backend'], 'rust')
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_return_aware_definite_assignment(self):
+        self.check_native(elif_chain, [(-3,), (0,), (5,), (50,)])
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_annotated_assignment(self):
+        self.check_native(annotated, [(0,), (10,)])
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_floor_division_and_modulo_follow_python(self):
+        values = [-7, -3, -1, 1, 3, 7, 2**63 - 1, -2**63]
+        self.check_native(divmod_kernel, [(a, b) for a in values for b in values
+                                          if not (a == -2**63 and b == -1) and abs(a // b * 1000) < 2**62
+                                          and abs(a // b * 1000 + a % b) < 2**62])
+        fn = optimize(divmod_kernel.python)
+        with self.assertRaises(ZeroDivisionError):
+            fn(5, 0)
+        self.assertEqual(fn(-2**63, -1), divmod_kernel.python(-2**63, -1))  # overflow -> replay
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_range_step(self):
+        cases = [(0, 10, 3), (10, 0, -3), (5, 5, 1), (-4, 4, 2), (9, -9, -4), (0, 3, 7)]
+        self.check_native(stepped, cases)
+        # index + step overflows i64 after the last element: loop must just end.
+        self.check_native(count_range, [(2**63 - 10, 2**63 - 1, 4), (-2**63 + 10, -2**63, -4),
+                                        (0, 2**63 - 1, 2**62), (3, -3, -1)])
+        with self.assertRaises(ValueError):
+            optimize(stepped.python)(0, 5, 0)
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_boolean_conditions_and_chained_compare(self):
+        self.check_native(logic, [(a, b) for a in range(-3, 4) for b in range(-3, 4)])
+
+    def test_keyword_and_positional_paths_agree(self):
+        self.assertEqual(arithmetic(2, 4), arithmetic(a=2, b=4))
+        self.assertEqual(arithmetic(2), arithmetic(2, 3))
+
+    @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
+    def test_concurrent_first_call(self):
+        import threading
+        with tempfile.TemporaryDirectory() as cache:
+            fn = optimize(square_sum.python, cache_dir=cache)
+            results, errors = [], []
+            def worker():
+                try:
+                    results.append(fn(1000))
+                except Exception as exc:
+                    errors.append(exc)
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [square_sum.python(1000)] * 8)
+            self.assertEqual(fn.report()['backend'], 'rust')
+
+    def test_internal_errors_fall_back(self):
+        from unittest.mock import patch as _patch
+        fn = optimize(arithmetic.python)
+        with _patch('pyrust_engine.runtime.Compiler', side_effect=RuntimeError('boom')):
+            self.assertEqual(fn(2, 3), 5)
+        self.assertIn('Internal compiler error', fn.report()['reason'])
+
 class Semantics(unittest.TestCase):
     def test_randomized_equivalence(self):
         rng = random.Random(17)

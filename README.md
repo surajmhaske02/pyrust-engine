@@ -42,15 +42,17 @@ Compilation happens on the first eligible call. Subsequent calls reuse the libra
 
 | Feature | Native behavior |
 |---|---|
-| Integer literals, variables, `+`, `-`, `*`, unary minus | Checked signed 64-bit operations |
-| Assignments and `+=`, `-=`, `*=` | Supported for definitely assigned local integers |
-| `for` over built-in `range(stop)` or `range(start, stop)` | Supported; negative bounds and nested loops supported |
-| `if` / `else`, single integer comparisons | Supported |
-| Final integer `return`, early integer returns | Supported conservatively |
-| Python big integers or intermediate overflow | Python fallback; no silent wrapping |
-| Lists, floats, division, modulo, calls, while, break, range steps | Python fallback |
+| Integer literals, variables, `+`, `-`, `*`, unary `-`/`+` | Checked signed 64-bit operations |
+| `//` and `%` | Python floor semantics; division by zero and `-2**63 // -1` replay in Python (so `ZeroDivisionError` is raised exactly as in Python) |
+| Assignments, annotated assignments (`x: int = 0`), `+=`, `-=`, `*=`, `//=`, `%=` | Supported for definitely assigned local integers |
+| `for` over built-in `range(stop)`, `range(start, stop)`, `range(start, stop, step)` | Supported; negative bounds/steps and nested loops supported; `step == 0` replays in Python (raises `ValueError`) |
+| `if` / `elif` / `else` | Supported; branches that always `return` are understood by the definite-assignment check |
+| Conditions | Comparisons (including chained `a < b < c`), `and`, `or`, `not`, integer truthiness (`if n:`) |
+| Integer `return` on every path | Supported (final `return` or `if`/`else` that returns on both sides) |
+| Python big integers or intermediate overflow | Python replay; no silent wrapping |
+| Lists, floats, true division `/`, `**`, calls, `while`, `break`/`continue` | Python fallback |
 | Closures, global reads, side effects, methods | Outside the native subset |
-| Missing source/compiler, compiler failure | Python fallback with reason |
+| Missing source/compiler, compiler failure, internal errors | Python fallback with reason |
 
 Unsupported source is rejected before native execution. No user source is interpolated as raw Rust syntax: the compiler generates code only from allowed AST nodes and maps identifiers to internal names. The accepted subset has no external side effects, so overflow replay does not duplicate external actions. This is conservative engineering, not a formal equivalence proof.
 
@@ -69,9 +71,13 @@ Python exceptions remain Python exceptions when falling back. `fallback=False` r
 
 This version uses **ctypes rather than PyO3/Maturin**, avoiding crate downloads and Python-version-specific extension builds. A future array/object interface could use PyO3. Native calls release the GIL through ctypes. Do not mutate function code, globals or builtins concurrently with execution.
 
+## Performance notes
+
+Native dispatch through `ctypes` costs roughly **1 µs per call** (measured: ~1,050 ns wrapped vs ~30 ns plain Python for `return a + b`). Plain positional calls take a fast path; keyword calls go through `inspect.Signature.bind` and are slower. Decorate functions that do substantial looping work per call, not tiny helpers called millions of times.
+
 ## Benchmark honestly
 
-`python -m examples.benchmark` checks equal results, reports first-call latency separately, and compares median warm timings over five runs. Speedup is null if Rust did not load. The included arithmetic benchmark is small and compiler-friendly; its result is not an application-wide performance promise. Measure representative workloads and include conversion, startup and compilation costs in your application budget. No comparison against Numba, Cython, PyPy or Codon is included yet.
+`python -m examples.benchmark` checks equal results, reports first-call latency separately, and compares median warm timings over five runs for two kernels: a vectorisable loop (best case) and a loop with a serial dependency (a more typical lower bound). It also measures per-call overhead on a tiny function, where native is slower. Speedup is null if Rust did not load. The included arithmetic benchmark is small and compiler-friendly; its result is not an application-wide performance promise. Measure representative workloads and include conversion, startup and compilation costs in your application budget. No comparison against Numba, Cython, PyPy or Codon is included yet.
 
 ## Safety and limitations
 
@@ -79,7 +85,7 @@ Only run trusted local Python. This is **not** a sandbox for uploaded or hostile
 
 Functions created with `exec`, notebook cells without retrievable source, decorated wrappers and unusual builtins environments may fall back. First-call compilation has a 120-second timeout. Per-function locking prevents duplicate compilation within one wrapper; separate processes may compile the same cache key concurrently. Compile failures remain Python-only for that wrapper; recreate it or restart after fixing the compiler environment.
 
-CI is configured for Ubuntu, Windows and macOS with Python 3.10/3.12/3.13. Configuration alone is not proof those jobs have passed. See VALIDATION.md for checks actually run in this session.
+CI is configured for Ubuntu, Windows and macOS with Python 3.10/3.12/3.13. Configuration alone is not proof those jobs have passed. See VALIDATION.md for the checks actually run locally.
 
 ## Push to GitHub
 
@@ -104,4 +110,8 @@ Choose a license before making this repository public. No license has been selec
 
 ## Roadmap
 
-Profile-guided hotspot suggestions; typed array kernels; float semantic policy; additional integer operations with Python-compatible errors; stronger differential/property testing; PyO3 object interoperability; comparative benchmarks. These are planned, not implemented.
+Profile-guided hotspot suggestions; `while`/`break`/`continue`; calls between optimized functions; typed array kernels; float semantic policy; lower call overhead (PyO3 or a CPython vectorcall extension); comparative benchmarks against Numba, Cython, PyPy and Codon. These are planned, not implemented.
+
+## Testing
+
+`tests/test_engine.py` holds targeted semantic tests. `tests/test_fuzz.py` generates random programs in the supported subset and checks native results (or exception types) against CPython; scale it up with `PYRUST_FUZZ_PROGRAMS=500 PYRUST_FUZZ_SEED=7 python -m unittest tests.test_fuzz`.
