@@ -5,7 +5,13 @@
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Add one decorator, and PyRust compiles a numeric Python function to native Rust. Results stay identical to Python: anything it can't run exactly falls back to Python.**
+**Make slow Python loops fast by adding one line.**
+
+Put `@optimize` above a function. PyRust turns that function into Rust code, so its loops can run many times faster. You still write normal Python, and **your answers never change**: if PyRust can't run something safely, it runs your normal Python code instead.
+
+- ✍️ **Write plain Python.** No new language and no build step.
+- ⚡ **Get speed on number-crunching loops:** up to ~40× faster in our tests.
+- 🛟 **Never get a wrong answer:** anything PyRust can't handle runs as normal Python.
 
 ```python
 from pyrust_engine import optimize
@@ -305,6 +311,23 @@ Regenerate the chart after a new benchmark run:
 python -m examples.benchmark_suite --output benchmarks/my-results.json
 python docs/make_chart.py benchmarks/my-results.json docs/benchmark-speedup.svg
 ```
+
+## What's missing for developers (v0.4)
+
+These gaps make PyRust harder to adopt today. Contributions are welcome on any of them.
+
+| Missing | Why it matters to a developer |
+|---|---|
+| **No PyPI package** | You have to `git clone` the repo; `pip install pyrust-engine` doesn't work yet. |
+| **No warning when a function falls back to Python** | Your code can quietly run at Python speed and you won't know unless you call `fn.report()`. A `warn_on_fallback=True` option or a log message would make this visible. |
+| **No "will this compile?" check for a single function** | The profiler checks a whole script by running it. A quick `fn.explain()` or `python -m pyrust_engine check file.py` that lists each unsupported line would save trial and error. |
+| **No calls between optimized functions** | A helper function used inside a hot loop can't be compiled with it, so you have to put all the logic in one function. |
+| **Common Python features unsupported** | Lists, `**`, `abs`/`min`/`max`, `math` functions and array writes all fall back to Python, which limits real-world code. |
+| **Needs Rust installed on every machine** | No prebuilt binaries, so every user and server needs `rustc`. |
+| **No type hints / `py.typed`** | Editors and type checkers don't know about `fn.report()`, `fn.prepare()` and the other helpers. |
+| **No tutorial notebook or API reference** | There's no step-by-step notebook to try it, and the `report()` fields aren't documented in one place. |
+| **No contributor guide** | No `CONTRIBUTING.md`, issue templates or formatter config, and the dense code style makes first contributions harder. |
+| **No GitHub Releases or macOS/Windows benchmarks** | Tags exist but there are no release notes to read, and speed numbers only cover Linux. |
 
 ## Roadmap
 
