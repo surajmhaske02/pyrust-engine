@@ -5,8 +5,7 @@ d = json.load(open(src))
 LABELS = {'integer_loop': 'Integer loop', 'float_recurrence': 'Float recurrence',
           'array_energy': 'Array kernel (100k)', 'tiny_scalar': 'Tiny add(a, b)',
           'json_array_pipeline': 'JSON → array pipeline'}
-SERIES = [('pyrust', 'PyRust', 's1', 'circle'), ('numba', 'Numba', 's2', 'square'),
-          ('numpy_vectorized', 'NumPy (vectorised)', 's3', 'diamond')]
+SERIES = [('pyrust', 'PyRust', 's1', 'circle')]
 rows = []
 for r in d['results']:
     py = r['python']['median_seconds']
@@ -40,7 +39,7 @@ o.append('''<style>
 .s1{fill:#3987e5}.s2{fill:#d95926}.s3{fill:#199e70}}
 </style>''')
 o.append(f'<rect class="bg" width="{W}" height="{H}" rx="8"/>')
-o.append(f'<text class="t1" x="20" y="28">Speedup versus plain Python — higher is faster</text>')
+o.append(f'<text class="t1" x="20" y="28">PyRust speedup versus plain Python — higher is faster</text>')
 # legend
 lx = 20
 for k, lbl, cls, shape in SERIES:

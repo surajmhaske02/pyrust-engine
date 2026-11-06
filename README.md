@@ -29,17 +29,17 @@ weighted_sum.report()        # native/fallback counts, timings, fallback reasons
 
 ## Comparison at a glance
 
-| | Plain Python | **PyRust 0.3** | Numba | NumPy (vectorised) |
-|---|---|---|---|---|
-| Integer loop (500k) | 25.5 ms · 1× | **0.93 ms · 27.5×** | 0.59 ms · 43.4× | n/a |
-| Float recurrence (300k) | 7.21 ms · 1× | **1.51 ms · 4.8×** | 1.75 ms · 4.1× | n/a |
-| Array kernel (100k float64) | 5.91 ms · 1× | **0.144 ms · 40.9×** | 0.056 ms · 105× | 0.066 ms · 90× |
-| Tiny `add(a, b)` per call | 0.034 µs · 1× | 2.08 µs · 0.016× | 0.11 µs · 0.30× | n/a |
-| JSON → array pipeline | 5.93 ms · 1× | **4.40 ms · 1.35×** | not measured | n/a |
-| Big integers / overflow | Exact | **Exact (replays in Python)** | Wraps at 64 bits | Wraps at 64 bits |
-| Unsupported code | Runs | **Runs in Python, reason logged** | Compile error | n/a |
-| Extra runtime dependencies | None | **None** (NumPy for arrays) | numba, llvmlite | numpy |
-| First call (compile) | None | 0.15–0.18 s (0.05 s from disk cache) | 0.03–0.49 s | None |
+| | Plain Python | **PyRust 0.3** |
+|---|---|---|
+| Integer loop (500k) | 25.5 ms · 1× | **0.93 ms · 27.5×** |
+| Float recurrence (300k) | 7.21 ms · 1× | **1.51 ms · 4.8×** |
+| Array kernel (100k float64) | 5.91 ms · 1× | **0.144 ms · 40.9×** |
+| Tiny `add(a, b)` per call | 0.034 µs · 1× | 2.08 µs · 0.016× |
+| JSON → array pipeline | 5.93 ms · 1× | **4.40 ms · 1.35×** |
+| Big integers / overflow | Exact | **Exact (replays in Python)** |
+| Unsupported code | Runs | **Runs in Python, reason logged** |
+| Extra runtime dependencies | None | **None** (NumPy for arrays) |
+| First call (compile) | None | 0.15–0.18 s (0.05 s from disk cache) |
 
 <sub>Speed numbers are "time · speedup vs Python". Full method, raw data and caveats under [How it compares](#how-it-compares).</sub>
 
@@ -75,36 +75,36 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ![Speedup versus plain Python](docs/benchmark-speedup.svg)
 
-| Workload | Python | **PyRust** | Numba | NumPy (vectorised) | PyRust vs Python |
-|---|---:|---:|---:|---:|---:|
-| Integer loop (`//`, `%`, branches; n = 500k) | 25.5 ms | **0.93 ms** | 0.59 ms | — | **27.5× faster** |
-| Float recurrence (n = 300k) | 7.21 ms | **1.51 ms** | 1.75 ms | — | **4.8× faster** |
-| Array kernel, sum of squares (100k float64) | 5.91 ms | **0.144 ms** | 0.056 ms | 0.066 ms | **40.9× faster** |
-| Tiny function `add(a, b)`, per call | 0.034 µs | 2.08 µs | 0.11 µs | — | **61× slower** |
-| JSON → NumPy → kernel → JSON pipeline | 5.93 ms | **4.40 ms** | — | — | **1.35× faster** |
+| Workload | Python | **PyRust** | PyRust vs Python |
+|---|---:|---:|---:|
+| Integer loop (`//`, `%`, branches; n = 500k) | 25.5 ms | **0.93 ms** | **27.5× faster** |
+| Float recurrence (n = 300k) | 7.21 ms | **1.51 ms** | **4.8× faster** |
+| Array kernel, sum of squares (100k float64) | 5.91 ms | **0.144 ms** | **40.9× faster** |
+| Tiny function `add(a, b)`, per call | 0.034 µs | 2.08 µs | **61× slower** |
+| JSON → NumPy → kernel → JSON pipeline | 5.93 ms | **4.40 ms** | **1.35× faster** |
 
-<sub>Median of 7 warm runs, wrapper and argument conversion included. Linux x86_64, CPython 3.13.18, Rust 1.97.0, NumPy 2.5.4, Numba 0.68.1 (`fastmath=False`). Raw samples: [`benchmarks/results-v0.3.0.json`](benchmarks/results-v0.3.0.json). Reproduce with `python -m examples.benchmark_suite`.</sub>
+<sub>Median of 7 warm runs, wrapper and argument conversion included. Linux x86_64, CPython 3.13.18, Rust 1.97.0, NumPy 2.5.4. Raw samples: [`benchmarks/results-v0.3.0.json`](benchmarks/results-v0.3.0.json). Reproduce with `python -m examples.benchmark_suite`.</sub>
 
 **How to read this, honestly:**
 
-- PyRust gives **large speedups on loop-heavy numeric code** and beat Numba on the float recurrence in this run.
-- **Numba is faster** on the integer and array kernels, and **vectorised NumPy** is the better tool when the problem is a whole-array expression.
+- PyRust gives **large speedups on loop-heavy numeric code**: 27.5× on the integer loop and 40.9× on the array kernel.
+- Gains vary by workload: the float recurrence improved 4.8×.
 - **Tiny functions get slower.** Each native call costs about 2 µs of dispatch. Decorate functions that do real work per call.
 - **End-to-end gains shrink** when parsing and conversion dominate: the JSON pipeline only improved 1.35×.
 
 ### Startup cost
 
-| Workload | PyRust: first call incl. Rust compile | PyRust: first call from disk cache | Numba: first call incl. JIT |
-|---|---:|---:|---:|
-| Integer loop | 0.175 s | 0.047 s | 0.488 s |
-| Float recurrence | 0.183 s | 0.062 s | 0.044 s |
-| Array kernel | 0.179 s | 0.049 s | 0.095 s |
+| Workload | First call incl. Rust compile | First call from disk cache |
+|---|---:|---:|
+| Integer loop | 0.175 s | 0.047 s |
+| Float recurrence | 0.183 s | 0.062 s |
+| Array kernel | 0.179 s | 0.049 s |
 
 PyRust caches compiled libraries on disk across processes. Use `fn.prepare()` (or `prepare(background=True)`) before latency-sensitive work.
 
 ### Design trade-offs
 
-Speed was only measured against Numba and NumPy. The rows for Cython, PyPy and Codon describe how each tool is designed, not benchmark results.
+This table compares how each tool is designed. It is not a benchmark.
 
 | | **PyRust** | Numba | Cython | PyPy | Codon |
 |---|---|---|---|---|---|

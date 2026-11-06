@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 436" width="760" height="436" role="img" aria-labelledby="t d">
 <title id="t">Speedup versus plain Python (log scale)</title>
-<desc id="d">Integer loop: PyRust 27.5×, Numba 43.4×; Float recurrence: PyRust 4.78×, Numba 4.12×; Array kernel (100k): PyRust 40.9×, Numba 105.1×, NumPy (vectorised) 90.2×; Tiny add(a, b): PyRust 0.016×, Numba 0.30×; JSON → array pipeline: PyRust 1.35×</desc>
+<desc id="d">Integer loop: PyRust 27.5×; Float recurrence: PyRust 4.78×; Array kernel (100k): PyRust 40.9×; Tiny add(a, b): PyRust 0.016×; JSON → array pipeline: PyRust 1.35×</desc>
 <style>
 .bg{fill:#fcfcfb}.t1{fill:#21201c;font:600 15px -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
 .t2{fill:#5f5e58;font:12px -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
@@ -14,13 +14,9 @@
 .s1{fill:#3987e5}.s2{fill:#d95926}.s3{fill:#199e70}}
 </style>
 <rect class="bg" width="760" height="436" rx="8"/>
-<text class="t1" x="20" y="28">Speedup versus plain Python — higher is faster</text>
+<text class="t1" x="20" y="28">PyRust speedup versus plain Python — higher is faster</text>
 <circle class="s1 m" cx="26.0" cy="48.0" r="5"/>
 <text class="t2" x="36" y="52">PyRust</text>
-<rect class="s2 m" x="90.7" y="43.5" width="9" height="9" rx="1.5"/>
-<text class="t2" x="105.2" y="52">Numba</text>
-<path class="s3 m" d="M157.2,42.0 L163.2,48.0 L157.2,54.0 L151.2,48.0 Z"/>
-<text class="t2" x="167.2" y="52">NumPy (vectorised)</text>
 <line class="grid" x1="190.0" x2="190.0" y1="64" y2="380"/>
 <text class="t2" x="190.0" y="398" text-anchor="middle">0.01×</text>
 <line class="grid" x1="313.2" x2="313.2" y1="64" y2="380"/>
@@ -33,36 +29,21 @@
 <text class="t2" x="682.9" y="398" text-anchor="middle">100×</text>
 <text class="t2" x="720" y="418" text-anchor="end">Log scale · median of 7 warm runs · Linux x86_64, Python 3.13, Rust 1.97 · PyRust 0.3.0</text>
 <text class="lab" x="20" y="105.0">Integer loop</text>
-<line class="stem" x1="436.5" x2="613.8" y1="93.0" y2="93.0"/>
-<circle class="s1 m" cx="613.8" cy="93.0" r="5"/>
-<text class="val" x="623.8" y="97.0" text-anchor="start">27.5×</text>
-<line class="stem" x1="436.5" x2="638.2" y1="109.0" y2="109.0"/>
-<rect class="s2 m" x="633.7" y="104.5" width="9" height="9" rx="1.5"/>
-<text class="val" x="648.2" y="113.0" text-anchor="start">43.4×</text>
+<line class="stem" x1="436.5" x2="613.8" y1="101.0" y2="101.0"/>
+<circle class="s1 m" cx="613.8" cy="101.0" r="5"/>
+<text class="val" x="623.8" y="105.0" text-anchor="start">27.5×</text>
 <text class="lab" x="20" y="167.0">Float recurrence</text>
-<line class="stem" x1="436.5" x2="520.1" y1="155.0" y2="155.0"/>
-<circle class="s1 m" cx="520.1" cy="155.0" r="5"/>
-<text class="val" x="530.1" y="159.0" text-anchor="start">4.78×</text>
-<line class="stem" x1="436.5" x2="512.2" y1="171.0" y2="171.0"/>
-<rect class="s2 m" x="507.7" y="166.5" width="9" height="9" rx="1.5"/>
-<text class="val" x="522.2" y="175.0" text-anchor="start">4.12×</text>
+<line class="stem" x1="436.5" x2="520.1" y1="163.0" y2="163.0"/>
+<circle class="s1 m" cx="520.1" cy="163.0" r="5"/>
+<text class="val" x="530.1" y="167.0" text-anchor="start">4.78×</text>
 <text class="lab" x="20" y="229.0">Array kernel (100k)</text>
-<line class="stem" x1="436.5" x2="635.1" y1="209.0" y2="209.0"/>
-<circle class="s1 m" cx="635.1" cy="209.0" r="5"/>
-<text class="val" x="645.1" y="213.0" text-anchor="start">40.9×</text>
-<line class="stem" x1="436.5" x2="685.6" y1="225.0" y2="225.0"/>
-<rect class="s2 m" x="681.1" y="220.5" width="9" height="9" rx="1.5"/>
-<text class="val" x="695.6" y="229.0" text-anchor="start">105.1×</text>
-<line class="stem" x1="436.5" x2="677.4" y1="241.0" y2="241.0"/>
-<path class="s3 m" d="M677.4,235.0 L683.4,241.0 L677.4,247.0 L671.4,241.0 Z"/>
-<text class="val" x="687.4" y="245.0" text-anchor="start">90.2×</text>
+<line class="stem" x1="436.5" x2="635.1" y1="225.0" y2="225.0"/>
+<circle class="s1 m" cx="635.1" cy="225.0" r="5"/>
+<text class="val" x="645.1" y="229.0" text-anchor="start">40.9×</text>
 <text class="lab" x="20" y="291.0">Tiny add(a, b)</text>
-<line class="stem" x1="436.5" x2="216.6" y1="279.0" y2="279.0"/>
-<circle class="s1 m" cx="216.6" cy="279.0" r="5"/>
-<text class="val" x="206.6" y="283.0" text-anchor="end">0.016×</text>
-<line class="stem" x1="436.5" x2="372.3" y1="295.0" y2="295.0"/>
-<rect class="s2 m" x="367.8" y="290.5" width="9" height="9" rx="1.5"/>
-<text class="val" x="362.3" y="299.0" text-anchor="end">0.30×</text>
+<line class="stem" x1="436.5" x2="216.6" y1="287.0" y2="287.0"/>
+<circle class="s1 m" cx="216.6" cy="287.0" r="5"/>
+<text class="val" x="206.6" y="291.0" text-anchor="end">0.016×</text>
 <text class="lab" x="20" y="353.0">JSON → array pipeline</text>
 <line class="stem" x1="436.5" x2="452.4" y1="349.0" y2="349.0"/>
 <circle class="s1 m" cx="452.4" cy="349.0" r="5"/>
