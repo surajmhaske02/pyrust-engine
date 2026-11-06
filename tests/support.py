@@ -8,4 +8,5 @@ from pyrust_engine import optimize as _optimize
 
 def optimize(function=None, **options):
     options.setdefault('native_loop_free', True)
+    options.setdefault('warn_on_fallback', False)
     return _optimize(function, **options)

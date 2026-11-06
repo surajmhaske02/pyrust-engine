@@ -27,9 +27,11 @@ CMP = ['<', '<=', '>', '>=', '==', '!=']
 
 
 class Generator:
-    def __init__(self, rng, floats=False):
+    def __init__(self, rng, floats=False, extended=False):
         self.rng = rng
         self.floats = floats
+        # extended=True adds the 0.5.0 operators, builtins, math functions and ternaries.
+        self.extended = extended
 
     # ---------------------------------------------------------------- integers
     def iexpr(self, names, loopvars, depth=0):
@@ -41,6 +43,8 @@ class Generator:
             return str(rng.choice(INT_CONSTANTS))
         if r < 0.38:
             return f'(-{self.iexpr(names, loopvars, depth + 1)})'
+        if self.extended and r < 0.55:
+            return self.iextra(names, loopvars, depth)
         op = rng.choice(['+', '-', '*', '//', '%'])
         left = self.iexpr(names, loopvars, depth + 1)
         if op == '*':  # keep CPython big-int growth linear so replays stay fast
@@ -48,6 +52,27 @@ class Generator:
         else:
             right = self.iexpr(names, loopvars, depth + 1)
         return f'({left} {op} {right})'
+
+    def iextra(self, names, loopvars, depth):
+        rng = self.rng
+        sub = lambda: self.iexpr(names, loopvars, depth + 1)
+        leaf = lambda: rng.choice(sorted(loopvars) + [str(c) for c in INT_CONSTANTS[:6]])
+        kind = rng.randrange(8)
+        if kind == 0:   # bounded growth: small base and exponent keep CPython replays fast
+            return f'({leaf()} ** {rng.randint(0, 3)})'
+        if kind == 1:
+            return f'({sub()} {rng.choice(["&", "|", "^"])} {sub()})'
+        if kind == 2:
+            return f'({sub()} {rng.choice(["<<", ">>"])} {rng.choice([0, 1, 3, 31, 63, 64, 70])})'
+        if kind == 3:
+            return f'(~{sub()})'
+        if kind == 4:
+            return f'abs({sub()})'
+        if kind == 5:
+            return f'{rng.choice(["min", "max"])}({", ".join(sub() for _ in range(rng.randint(2, 3)))})'
+        if kind == 6:
+            return f'({sub()} if {self.cond(names, loopvars, 1)} else {sub()})'
+        return f'pow({leaf()}, {rng.randint(0, 2)})'
 
     # ------------------------------------------------------------------ floats
     def fexpr(self, fnames, inames, depth=0):
@@ -60,6 +85,8 @@ class Generator:
             return rng.choice(FLOAT_CONSTANTS)
         if r < 0.36:
             return f'(-{self.fexpr(fnames, inames, depth + 1)})'
+        if self.extended and r < 0.55:
+            return self.fextra(fnames, inames, depth)
         op = rng.choice(['+', '-', '*', '/'])
         left = self.fexpr(fnames, inames, depth + 1)
         if inames and rng.random() < 0.25:
@@ -67,6 +94,27 @@ class Generator:
         else:
             right = self.fexpr(fnames, inames, depth + 1)
         return f'({left} {op} {right})'
+
+    def fextra(self, fnames, inames, depth):
+        rng = self.rng
+        sub = lambda: self.fexpr(fnames, inames, depth + 1)
+        kind = rng.randrange(8)
+        if kind == 0:
+            return f'({sub()} {rng.choice(["//", "%", "**"])} {sub()})'
+        if kind == 1:
+            fn = rng.choice(['sqrt', 'exp', 'log', 'sin', 'cos', 'atan', 'tanh', 'fabs', 'log10'])
+            return f'math.{fn}({sub()})'
+        if kind == 2:
+            return f'abs({sub()})'
+        if kind == 3:
+            return f'{rng.choice(["min", "max"])}({", ".join(sub() for _ in range(rng.randint(2, 3)))})'
+        if kind == 4:
+            return f'({sub()} if {self.cond(fnames, inames, 1)} else {sub()})'
+        if kind == 5:
+            return f'float({rng.choice(["int", "math.floor", "math.ceil"])}({sub()}))'
+        if kind == 6 and inames:
+            return f'({rng.choice(sorted(inames))} / {rng.choice([1, 2, 3, 7, 0])})'  # int / int
+        return rng.choice(['math.pi', 'math.e', 'math.inf'])
 
     def expr(self, names, loopvars):
         if self.floats:
@@ -176,18 +224,18 @@ def outcome(fn, args):
 
 @unittest.skipUnless(RUST, 'rustc required')
 class GeneratedProgramFuzz(unittest.TestCase):
-    def run_fuzz(self, floats, default_count, seed_offset):
+    def run_fuzz(self, floats, default_count, seed_offset, extended=False):
         seed = int(os.environ.get('PYRUST_FUZZ_SEED', '20261106')) + seed_offset
         count = int(os.environ.get('PYRUST_FUZZ_PROGRAMS', str(default_count)))
         rng = random.Random(seed)
-        gen = Generator(rng, floats=floats)
+        gen = Generator(rng, floats=floats, extended=extended)
         programs = [gen.program(i) for i in range(count)]
         arg_pool = FLOAT_ARGS if floats else INT_ARGS
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
-            name = f'pyrust_fuzz_{"f" if floats else "i"}_{seed}'
+            name = f'pyrust_fuzz_{"f" if floats else "i"}{"x" if extended else ""}_{seed}'
             path = os.path.join(work, name + '.py')
             with open(path, 'w') as fh:
-                fh.write('\n'.join(src for src, _ in programs))
+                fh.write('import math\n' + '\n'.join(src for src, _ in programs))
             spec = importlib.util.spec_from_file_location(name, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -206,6 +254,12 @@ class GeneratedProgramFuzz(unittest.TestCase):
 
     def test_float_programs(self):
         self.run_fuzz(floats=True, default_count=20, seed_offset=1)
+
+    def test_extended_integer_programs(self):
+        self.run_fuzz(floats=False, default_count=30, seed_offset=2, extended=True)
+
+    def test_extended_float_programs(self):
+        self.run_fuzz(floats=True, default_count=20, seed_offset=3, extended=True)
 
 
 if __name__ == '__main__':

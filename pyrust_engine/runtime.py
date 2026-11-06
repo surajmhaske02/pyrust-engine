@@ -1,6 +1,5 @@
 """Typed native dispatch, explicit preparation/retry, and synchronized metrics."""
 import ast
-import builtins
 from collections import Counter
 import ctypes
 import functools
@@ -13,15 +12,20 @@ import textwrap
 import threading
 import time
 import types
-from .compiler import Compiler, Unsupported
+import warnings
+from .compiler import Compiler, Unsupported, KNOWN_BUILTINS
 from .cache import cache_root, process_lock, cached_path, compile_library
 
-_BUILTINS = {n:getattr(builtins,n) for n in ('range','len','float')}
 _STATUS = {1:'integer overflow',2:'zero divisor or zero range step',3:'array index out of bounds',
-           4:'native iteration budget exceeded',5:'no scalar return'}
+           4:'native iteration budget exceeded',5:'no scalar return',
+           6:'value outside the native fast path (math domain, float overflow, negative exponent or huge int division)'}
+_TYPE_NAMES = {'i64':'int','f64':'float','array':'F64Array'}
 
 class OptimizationError(RuntimeError):
     pass
+
+class PyRustFallbackWarning(RuntimeWarning):
+    """A decorated function ran as plain Python instead of native code."""
 
 LOOP_FREE_REASON=('loop-free function: a native call costs more than the work it saves, '
                   'so it runs as plain Python (pass native_loop_free=True to force Rust)')
@@ -38,7 +42,53 @@ def _is_loop_free(fn):
         return False
     if not tree.body or not isinstance(tree.body[0],(ast.FunctionDef,ast.AsyncFunctionDef)):
         return False
-    return not any(isinstance(node,(ast.For,ast.AsyncFor,ast.While)) for node in ast.walk(tree.body[0]))
+    # Walk the body only: decorators such as @optimize(...) are calls too.
+    for node in (n for statement in tree.body[0].body for n in ast.walk(statement)):
+        if isinstance(node,(ast.For,ast.AsyncFor,ast.While)):
+            return False
+        # A call to another (possibly looping) function is real work that can be compiled.
+        if (isinstance(node,ast.Call) and isinstance(node.func,ast.Name)
+                and node.func.id not in KNOWN_BUILTINS
+                and isinstance(fn.__globals__.get(node.func.id),types.FunctionType)):
+            return False
+    return True
+
+def _describe(fn,max_iterations):
+    """Try compiling; return (ok, details dict). Never raises."""
+    try:
+        compiler=Compiler(fn,max_iterations)
+        compiler.generate()
+    except Exception as exc:  # Unsupported, missing source, ...
+        return False,{'reason':str(exc)}
+    return True,{'parameters':{p:_TYPE_NAMES[k] for p,k in compiler.types.items() if p in compiler.signature.parameters},
+                 'returns':_TYPE_NAMES[compiler.return_type],'calls':list(compiler.callees)}
+
+def _explain_text(fn,max_iterations,*,loop_free=False,backend=None,reasons=None):
+    ok,info=_describe(fn,max_iterations)
+    name=getattr(fn,'__qualname__',fn.__name__)
+    lines=[]
+    if loop_free:
+        lines.append(f'{name}: runs as plain Python on purpose (no loop, so native code cannot be faster).')
+        lines.append('  Use @optimize(native_loop_free=True) to compile it anyway.' if ok else
+                     f'  It also could not be compiled: {info["reason"]}')
+    elif ok:
+        lines.append(f'{name}: compiles to Rust.')
+    else:
+        lines.append(f'{name}: runs as plain Python. It cannot be compiled:')
+        lines.append(f'  {info["reason"]}')
+    if ok:
+        params=', '.join(f'{p}: {t}' for p,t in info['parameters'].items()) or 'none'
+        lines.append(f'  parameters: {params}')
+        lines.append(f'  returns: {info["returns"]}')
+        if info['calls']:
+            lines.append(f'  compiled together with: {", ".join(info["calls"])}')
+        if not shutil.which('rustc'):
+            lines.append('  warning: rustc is not on PATH, so calls will run as plain Python until Rust is installed.')
+    if backend:
+        lines.append(f'  current backend: {backend}')
+    if reasons:
+        lines.append('  fallbacks so far: '+'; '.join(f'{r} ({c}x)' for r,c in reasons.items()))
+    return '\n'.join(lines)
 
 def _plain_python(fn,max_iterations):
     """Zero-overhead result for loop-free functions: a real Python function, not a wrapper.
@@ -62,15 +112,19 @@ def _plain_python(fn,max_iterations):
 
     clone.python=fn;clone.report=report;clone.prepare=prepare;clone.reset=report
     clone.rust_source=lambda:Compiler(fn,max_iterations).generate()
+    clone.explain=lambda:_explain_text(fn,max_iterations,loop_free=True)
     return clone
 
 def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, max_iterations=10_000_000,
-             native_loop_free=False):
+             native_loop_free=False, warn_on_fallback=True):
     """Compile a numeric Python function to Rust, falling back to Python when needed.
 
     native_loop_free: loop-free functions (no for/while) run as plain Python by default,
     because native dispatch overhead (~2 us) is larger than their work. Set True to
     compile them anyway (for example to test the native path).
+
+    warn_on_fallback: emit a PyRustFallbackWarning the first time each distinct reason
+    makes a call run as plain Python, so slow paths are visible. Set False to silence.
     """
     if backend!='rust':
         raise ValueError('Only backend="rust" is supported')
@@ -88,14 +142,13 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                'calls':0,'cache_hit':False,'cache_rebuilt':False,'compile_seconds':0.0,'native_seconds':0.0,
                'fallback_seconds':0.0,'wrapper_seconds':0.0,'compile_attempts':0}
         reasons=Counter()
+        warned=set()
         loaded=None;model=None;source=None;attempted=False;worker=None
         # (lib, entry, output_type, kinds, used_builtins) published as one tuple so the
         # hot path can read it without taking compile_lock.
         snapshot=None
         param_names=tuple(signature.parameters)
         n_params=len(param_names)
-        fn_globals=fn.__globals__
-        fn_builtins=fn.__builtins__ if isinstance(fn.__builtins__,dict) else vars(fn.__builtins__)
 
         def update(**values):
             with metrics_lock:
@@ -114,8 +167,13 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
         def python_call(reason,args,kwargs):
             with metrics_lock:
                 state['reason']=reason
+                first=reason not in warned
+                warned.add(reason)
             if not fallback:
                 raise OptimizationError(reason)
+            if warn_on_fallback and first and reason!='background compilation in progress':
+                warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}',
+                              PyRustFallbackWarning,stacklevel=3)
             start=time.perf_counter()
             try:
                 return fn(*args,**kwargs)
@@ -176,7 +234,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     loaded=candidate
                     snapshot=(candidate[0],candidate[1],candidate[2],
                               tuple(description.types[p] for p in param_names),
-                              tuple(sorted(description.used_builtins)))
+                              description.guards,description.code_guards)
                     update(backend='rust',reason=None,compile_error=None,cache_hit=hit,cache_rebuilt=rebuilt)
                 except Exception as exc:  # any compiler/loader failure means Python fallback
                     loaded=None;snapshot=None
@@ -260,10 +318,13 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     if active is None:
                         return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs)
                 # Holding `active` keeps the library loaded for the duration of the call.
-                lib,entry,output,kinds,used=active
-                for name in used:
-                    if fn_globals.get(name,fn_builtins.get(name)) is not _BUILTINS[name]:
+                lib,entry,output,kinds,guards,code_guards=active
+                for namespace,builtin_ns,name,expected in guards:
+                    if namespace.get(name,builtin_ns.get(name)) is not expected:
                         return python_call(f'{name} has been rebound',args,kwargs)
+                for callee,code in code_guards:
+                    if callee.__code__ is not code:
+                        return python_call(f'code of called function {callee.__qualname__} changed',args,kwargs)
                 try:
                     native_args=convert(values,kinds)
                 except Unsupported as exc:
@@ -291,6 +352,8 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                         state['reason']=None
 
         wrapped.python=fn;wrapped.report=report;wrapped.prepare=prepare;wrapped.reset=reset
+        wrapped.explain=lambda:_explain_text(fn,max_iterations,backend=report()['backend'],
+                                             reasons=report()['fallback_reasons'])
         wrapped.rust_source=lambda:source if source is not None else Compiler(fn,max_iterations).generate()
         return wrapped
     return decorate(function) if function is not None else decorate
