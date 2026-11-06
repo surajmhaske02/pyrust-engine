@@ -37,6 +37,13 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                'fallback_seconds':0.0,'wrapper_seconds':0.0,'compile_attempts':0}
         reasons=Counter()
         loaded=None;model=None;source=None;attempted=False;worker=None
+        # (lib, entry, output_type, kinds, used_builtins) published as one tuple so the
+        # hot path can read it without taking compile_lock.
+        snapshot=None
+        param_names=tuple(signature.parameters)
+        n_params=len(param_names)
+        fn_globals=fn.__globals__
+        fn_builtins=fn.__builtins__ if isinstance(fn.__builtins__,dict) else vars(fn.__builtins__)
 
         def update(**values):
             with metrics_lock:
@@ -79,7 +86,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
             return lib,entry,output
 
         def compile_once():
-            nonlocal loaded,model,source,attempted
+            nonlocal loaded,model,source,attempted,snapshot
             with compile_lock:
                 if attempted:
                     return
@@ -95,7 +102,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     if not compiler:
                         raise Unsupported('rustc is not installed or not on PATH')
                     version=subprocess.check_output([compiler,'-vV'],text=True,timeout=15)
-                    key=hashlib.sha256((source+version+platform.platform()+'abi2-O3-ed2021').encode()).hexdigest()
+                    key=hashlib.sha256((source+version+platform.platform()+'abi3-O3-ed2021').encode()).hexdigest()
                     root=cache_root(cache_dir)
                     with process_lock(root/(key+'.lock')):
                         path=cached_path(root,key)
@@ -114,9 +121,12 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                             rebuilt=True;hit=False
                     model=description
                     loaded=candidate
+                    snapshot=(candidate[0],candidate[1],candidate[2],
+                              tuple(description.types[p] for p in param_names),
+                              tuple(sorted(description.used_builtins)))
                     update(backend='rust',reason=None,compile_error=None,cache_hit=hit,cache_rebuilt=rebuilt)
-                except (Unsupported,OSError,TypeError,ValueError,AttributeError,RuntimeError,subprocess.SubprocessError) as exc:
-                    loaded=None
+                except Exception as exc:  # any compiler/loader failure means Python fallback
+                    loaded=None;snapshot=None
                     update(backend='python',reason=str(exc),compile_error=str(exc))
                 finally:
                     with metrics_lock:
@@ -136,29 +146,22 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
             return report()
 
         def reset():
-            nonlocal loaded,model,source,attempted,worker
+            nonlocal loaded,model,source,attempted,worker,snapshot
             # Finish background preparation before clearing compilation state.
             active=worker
             if active is not None and active.is_alive():
                 active.join()
             with compile_lock:
-                loaded=None;model=None;source=None;attempted=False;worker=None
+                loaded=None;model=None;source=None;attempted=False;worker=None;snapshot=None
                 update(backend='pending',reason=None,compile_error=None,cache_hit=False,cache_rebuilt=False)
             return report()
 
         def changed():
             return any(a is not b for a,b in zip(original,(fn.__code__,fn.__defaults__,fn.__kwdefaults__)))
 
-        def builtin_reason(description):
-            for name in description.used_builtins:
-                if fn.__globals__.get(name,fn.__builtins__.get(name)) is not _BUILTINS[name]:
-                    return f'{name} has been rebound'
-            return None
-
-        def convert(values,description):
+        def convert(values,kinds):
             args=[]
-            for name,value in values.items():
-                kind=description.types[name]
+            for name,kind,value in zip(param_names,kinds,values):
                 if kind=='i64':
                     if type(value) is not int or not -(2**63)<=value<2**63:
                         raise Unsupported(f'{name}: expected exact signed 64-bit int')
@@ -179,48 +182,60 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     args.extend([value.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),value.size])
             return args
 
-        def invoke(*args,**kwargs):
-            with metrics_lock:
-                state['calls']+=1
-            if changed():
-                return python_call('function code or defaults changed; create a new wrapper',args,kwargs)
-            bound=signature.bind(*args,**kwargs);bound.apply_defaults()
-            if loaded is None:
-                if worker is not None and worker.is_alive():
-                    return python_call('background compilation in progress',args,kwargs)
-                compile_once()
-            # Snapshot the library and compiler together; keep the library alive through the call.
-            with compile_lock:
-                active=loaded;description=model
-            if active is None:
-                return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs)
-            reason=builtin_reason(description)
-            if reason:
-                return python_call(reason,args,kwargs)
-            try:
-                native_args=convert(bound.arguments,description)
-            except Unsupported as exc:
-                return python_call(str(exc),args,kwargs)
-            lib,entry,output=active
-            out=output();start=time.perf_counter()
-            status=entry(*native_args,ctypes.byref(out))
-            elapsed=time.perf_counter()-start
-            with metrics_lock:
-                state['native_calls']+=1
-                state['native_seconds']+=elapsed
-            if status:
-                return python_call(_STATUS.get(status,'unknown native guard failure'),args,kwargs)
-            update(reason=None)
-            return out.value
+        perf_counter=time.perf_counter
 
         @functools.wraps(fn)
         def wrapped(*args,**kwargs):
-            start=time.perf_counter()
+            start=perf_counter()
+            native_elapsed=None
             try:
-                return invoke(*args,**kwargs)
+                if (fn.__code__ is not original[0] or fn.__defaults__ is not original[1]
+                        or fn.__kwdefaults__ is not original[2]):
+                    return python_call('function code or defaults changed; create a new wrapper',args,kwargs)
+                if kwargs or len(args)!=n_params:
+                    # Slow path for keywords/defaults; raises CPython's TypeError for bad calls.
+                    bound=signature.bind(*args,**kwargs);bound.apply_defaults()
+                    values=tuple(bound.arguments.values())
+                else:
+                    values=args  # fast path: exact positional call
+                active=snapshot
+                if active is None:
+                    if worker is not None and worker.is_alive():
+                        return python_call('background compilation in progress',args,kwargs)
+                    compile_once()
+                    active=snapshot
+                    if active is None:
+                        return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs)
+                # Holding `active` keeps the library loaded for the duration of the call.
+                lib,entry,output,kinds,used=active
+                for name in used:
+                    if fn_globals.get(name,fn_builtins.get(name)) is not _BUILTINS[name]:
+                        return python_call(f'{name} has been rebound',args,kwargs)
+                try:
+                    native_args=convert(values,kinds)
+                except Unsupported as exc:
+                    return python_call(str(exc),args,kwargs)
+                out=output()
+                t0=perf_counter()
+                status=entry(*native_args,ctypes.byref(out))
+                elapsed=perf_counter()-t0
+                if status:
+                    with metrics_lock:
+                        state['native_calls']+=1
+                        state['native_seconds']+=elapsed
+                    return python_call(_STATUS.get(status,'unknown native guard failure'),args,kwargs)
+                native_elapsed=elapsed
+                return out.value
             finally:
+                end=perf_counter()
+                # One lock acquisition per call for all counters.
                 with metrics_lock:
-                    state['wrapper_seconds']+=time.perf_counter()-start
+                    state['calls']+=1
+                    state['wrapper_seconds']+=end-start
+                    if native_elapsed is not None:
+                        state['native_calls']+=1
+                        state['native_seconds']+=native_elapsed
+                        state['reason']=None
 
         wrapped.python=fn;wrapped.report=report;wrapped.prepare=prepare;wrapped.reset=reset
         wrapped.rust_source=lambda:source if source is not None else Compiler(fn,max_iterations).generate()

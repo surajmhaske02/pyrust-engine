@@ -1,4 +1,60 @@
-# Validation — 6 November 2026
+# Validation
+
+## 0.3.0 — merge of the 0.2.0 release and the independent review, 6 November 2026
+
+Executed on Linux x86_64, CPython 3.13.18, Rust 1.97.0, NumPy 2.5.4, Numba 0.68.1. Windows and macOS were **not** run; the CI matrix covers them once pushed.
+
+### Re-check of 0.2.0 as delivered
+
+- All **34** original 0.2.0 tests passed unchanged on this newer Python/Rust combination.
+- The 0.2.0 benchmark results reproduced in shape (table below).
+
+### Tests after the merge
+
+- `python -m unittest discover -s tests -v`: **47 tests passed**, 0 failures, 0 skips (34 original + 11 in `test_v3.py` + 2 generated-program fuzz tests).
+- With `rustc` removed from `PATH`: 14 passed, 33 native-only tests skipped (fallback path).
+
+### Generated-program differential fuzzing (new)
+
+0.2.0's randomized tests used fixed function templates. `tests/test_fuzz.py` instead generates whole random programs in the supported subset (assignments, annotated assignments, `+ - * // % /`, unary minus, `for` over all `range` forms, `while`, `break`, `continue`, `if/elif/else`, `and/or/not`, chained comparisons, truthiness, early returns) and requires identical results (floats compared by `repr`, so NaN and -0.0 are exact) or identical exception types. Every program must compile natively.
+
+| Run | Integer programs | Float programs | Calls compared | Mismatches |
+|---|---:|---:|---:|---:|
+| Seeds 1–8, 250 programs each per kind | 2,000 | 2,000 | 32,000 | **0** |
+
+Sensitivity check: planting a wrong modulo sign rule made the integer fuzz fail immediately; replacing `a / b` with `a * (1.0 / b)` made the float fuzz fail immediately. Restoring the code made both pass.
+
+### Findings fixed in 0.3.0
+
+1. **Per-call overhead** — every call ran `inspect.Signature.bind`, took four locks and read the clock four times: 5.3 µs per `add(a, b)` call (plain Python 40 ns). Now 2.0 µs positional, 4.3 µs keyword.
+2. **`elif` chains with early returns, and branches ending in `break`/`continue`, fell back to Python** because definite assignment intersected all branches. Now exit-aware.
+3. **A final `return` was required** even when every path returned (e.g. `if/else` both returning). Now any path that falls off the end replays in Python and returns `None`.
+4. **Common conditions fell back**: chained comparisons, `if n:`, and `if x > 0:` with a float `x`. Now native (integer literals only up to 2**53, where conversion is exact; `2**53 + 1` is still rejected and tested).
+5. **Some unexpected exceptions escaped** from compilation instead of falling back (only a fixed list of exception types was caught). Now any exception falls back and is reported.
+
+### Behaviour documented, not changed
+
+- **Iteration budget**: when a call exceeds `max_iterations` (default 10,000,000), the native work is discarded and the whole call is replayed in Python. A 12,000,000-iteration loop took 0.450 s in Python, 0.384 s with the default budget and 0.015 s with `max_iterations=10**9`.
+
+### Benchmarks (`python -m examples.benchmark_suite`, 7 warm samples, median)
+
+| Workload | Python ms | PyRust ms | Python / PyRust | Numba ms | First call incl. compile | Disk-cache first call |
+|---|---:|---:|---:|---:|---:|---:|
+| integer_loop | 25.52 | 0.929 | 27.5× | 0.588 | 0.175 s | 0.047 s |
+| float_recurrence | 7.21 | 1.510 | 4.8× | 1.751 | 0.183 s | 0.062 s |
+| array_energy | 5.91 | 0.144 | 40.9× | 0.056 | 0.179 s | 0.049 s |
+| tiny_scalar (per call) | 0.000034 | 0.002078 | 0.016× (slower) | 0.000113 | 0.150 s | 0.048 s |
+| json_array_pipeline | 5.93 | 4.40 | 1.35× | — | — | — |
+
+Full samples: `benchmarks/results-v0.3.0.json`. One machine, controlled workloads; not production load testing. Numba was faster on the integer and array kernels; PyRust was slightly faster on the float recurrence in this run.
+
+### Still untested
+
+Windows and macOS, ARM, production workloads, memory pressure, generated-program fuzzing of array kernels, and comparisons with Cython, PyPy and Codon.
+
+---
+
+## 0.2.0 validation (original author) — 6 November 2026
 
 ## Executed checks
 

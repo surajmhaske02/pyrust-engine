@@ -100,6 +100,10 @@ class Compiler:
                 return f'({value}).checked_neg().ok_or(1)?', kind
             if kind == 'f64':
                 return f'(-({value}))', kind
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.UAdd):
+            value, kind = self.expr(n.operand)
+            if kind in ('i64', 'f64'):
+                return f'({value})', kind
         if isinstance(n, ast.BinOp):
             a, ta = self.expr(n.left)
             b, tb = self.expr(n.right)
@@ -145,13 +149,44 @@ class Compiler:
         if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
             return f'!({self.condition(n.operand)})'
         ops = {ast.Lt:'<',ast.LtE:'<=',ast.Gt:'>',ast.GtE:'>=',ast.Eq:'==',ast.NotEq:'!='}
-        if isinstance(n, ast.Compare) and len(n.ops)==1 and type(n.ops[0]) in ops:
-            a, ta = self.expr(n.left)
-            b, tb = self.expr(n.comparators[0])
-            if ta != tb or ta == 'array':
-                raise Unsupported('Comparison operands must have the same scalar type')
-            return f'({a}) {ops[type(n.ops[0])]} ({b})'
+        if isinstance(n, ast.Compare) and all(type(op) in ops for op in n.ops):
+            # Chained comparisons: operands are pure, so evaluating one that Python
+            # would have short-circuited can at most cause a guard failure and replay.
+            operands = [self.compare_operand(x) for x in [n.left, *n.comparators]]
+            parts = []
+            for (a, ta, ca), op, (b, tb, cb) in zip(operands, n.ops, operands[1:]):
+                if ta != tb:
+                    # int literal vs float: exact when |literal| <= 2**53.
+                    if ta == 'i64' and tb == 'f64' and ca is not None:
+                        a, ta = f'({float(ca)!r}f64)', 'f64'
+                    elif tb == 'i64' and ta == 'f64' and cb is not None:
+                        b, tb = f'({float(cb)!r}f64)', 'f64'
+                if ta != tb or ta == 'array':
+                    raise Unsupported('Comparison operands must have the same scalar type')
+                parts.append(f'(({a}) {ops[type(op)]} ({b}))')
+            return '(' + ' && '.join(parts) + ')'
+        try:
+            value, kind = self.expr(n)
+        except Unsupported:
+            raise Unsupported('Use scalar comparisons in conditions') from None
+        if kind == 'i64':
+            return f'(({value}) != 0i64)'
+        if kind == 'f64':
+            return f'(({value}) != 0.0f64)'  # NaN is truthy, -0.0 is falsy, as in Python
         raise Unsupported('Use scalar comparisons in conditions')
+
+    def compare_operand(self, node):
+        """Return (rust, kind, exact_int_literal_or_None)."""
+        literal = None
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            literal = node.value
+        elif (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
+              and isinstance(node.operand, ast.Constant) and type(node.operand.value) is int):
+            literal = -node.operand.value
+        if literal is not None and abs(literal) > 2**53:
+            literal = None
+        value, kind = self.expr(node)
+        return value, kind, literal
 
     def assign(self, name, value, kind):
         if kind == 'array' or (name in self.types and self.types[name] != kind):
@@ -161,8 +196,13 @@ class Compiler:
         return f'{self.name(name)} = {value};'
 
     def block(self, nodes):
+        """Compile statements. Sets self.exits to True when control can never fall
+        off the end of this block (return/break/continue on every path)."""
         lines = []
+        exits = False
         for n in nodes:
+            if exits:
+                break  # unreachable in Python too
             if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value,str):
                 continue
             if isinstance(n, ast.Pass):
@@ -182,14 +222,26 @@ class Compiler:
                     raise Unsupported('All returns must have the same scalar type')
                 self.return_type = kind
                 lines.append(f'return Ok({value});')
+                exits = True
             elif isinstance(n, ast.If):
                 cond = self.condition(n.test)
                 before = self.assigned.copy()
                 yes = self.block(n.body)
+                yes_exits = self.exits
                 yes_assigned = self.assigned.copy()
                 self.assigned = before.copy()
                 no = self.block(n.orelse)
-                self.assigned &= yes_assigned
+                no_exits = self.exits
+                no_assigned = self.assigned
+                # A branch that never falls through does not constrain what is
+                # definitely assigned after the if statement.
+                if yes_exits and not no_exits:
+                    self.assigned = no_assigned
+                elif no_exits and not yes_exits:
+                    self.assigned = yes_assigned
+                else:
+                    self.assigned = yes_assigned & no_assigned
+                exits = yes_exits and no_exits
                 lines.append(f'if {cond} {{\n{yes}\n}} else {{\n{no}\n}}')
             elif isinstance(n, (ast.For,ast.While)) and not n.orelse:
                 before = self.assigned.copy()
@@ -223,15 +275,19 @@ let current{j}=cursor{j}; cursor{j}+=step{j};
                 lines.append(f'{header}\n{body}\n{tail}')
             elif isinstance(n,(ast.Break,ast.Continue)) and self.loop_depth:
                 lines.append('break;' if isinstance(n,ast.Break) else 'continue;')
+                exits = True
             else:
                 raise Unsupported(f'Unsupported statement: {type(n).__name__}')
+        self.exits = exits
         return '\n'.join(lines)
 
     def generate(self):
-        if not self.node.body or not isinstance(self.node.body[-1],ast.Return):
-            raise Unsupported('A final scalar return is required')
         params = list(self.signature.parameters)
         body = self.block(self.node.body)
+        if self.return_type is None:
+            raise Unsupported('At least one scalar return is required')
+        # A path that falls off the end returns Err(5): the call is replayed in
+        # Python, which returns None exactly as the original function does.
         declarations = '\n'.join(f'let mut {self.name(k)}: {t} = {"0.0" if t=="f64" else "0"};'
                                  for k,t in self.types.items() if k not in params)
         arguments=[]; ffi=[]; calls=[]
@@ -246,7 +302,7 @@ let current{j}=cursor{j}; cursor{j}+=step{j};
                 ffi.append(f'{name}: {kind}')
                 calls.append(name)
         ffi.append(f'out: *mut {self.return_type}')
-        return f'''// Generated by PyRust Engine 0.2.
+        return f'''// Generated by PyRust Engine 0.3.
 #![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables)]
 {HELPERS}
 fn compute({','.join(arguments)})->Result<{self.return_type},i32>{{

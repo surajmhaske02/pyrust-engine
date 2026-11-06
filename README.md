@@ -1,4 +1,4 @@
-# PyRust Engine 0.2
+# PyRust Engine 0.3
 
 A typed Python-to-Rust middleware prototype. Decorate supported computational functions with `@optimize`; the engine compiles them into native Rust libraries and keeps Python fallback for unsupported inputs, syntax, and native guard failures.
 
@@ -84,19 +84,19 @@ Keep inputs alive and do not mutate, resize or free their buffers concurrently w
 |---|---|
 | Scalar parameters | `int`, `float`; unannotated defaults to `int` |
 | Arrays | `F64Array`, `len(a)`, `float(a[i])`; read-only operations |
-| Integer operations | `+`, `-`, `*`, unary minus, `//`, `%`, checked overflow |
-| Float operations | `+`, `-`, `*`, unary minus, `/`; no fast-math flags |
+| Integer operations | `+`, `-`, `*`, unary `-`/`+`, `//`, `%`, checked overflow |
+| Float operations | `+`, `-`, `*`, unary `-`/`+`, `/`; no fast-math flags |
 | Mixed int/float arithmetic | `+`, `-`, `*`, `/` when at least one operand is float |
 | Conversion | Explicit built-in `float(scalar)` |
-| Conditions | Single comparisons of same-type scalars, `and`, `or`, `not` in conditions |
+| Conditions | Comparisons of same-type scalars, including chained `a < b < c`; float vs integer literal with \|literal\| ≤ 2**53 (`if x > 0:`); `and`, `or`, `not`; truthiness `if n:` / `if x:` |
 | Loops | `range(stop)`, `range(start, stop[, step])`, including negative steps; `while` |
-| Control flow | Nested loops, `if`/`else`, `break`, `continue`, `pass` |
+| Control flow | Nested loops, `if`/`elif`/`else`, `break`, `continue`, `pass` |
 | Local variables | Ordinary/annotated assignment and supported augmented operations |
-| Return | Scalar return; final return required; early returns allowed |
+| Return | Scalar returns of one type; early returns allowed; a path that falls off the end replays in Python (returning `None`, as the original does) |
 
-Not supported: integer `/`, float `//` or `%`, powers, mixed-type comparisons, chained comparisons, general calls, lists, dictionaries, strings, classes, array writes, array outputs, recursion, closures, generators, async, loop `else`, exceptions in native source, or arbitrary dynamic Python. These use Python fallback.
+Not supported: integer `/`, float `//` or `%`, powers, comparisons between int and float variables, general calls, lists, dictionaries, strings, classes, array writes, array outputs, recursion, closures, generators, async, loop `else`, exceptions in native source, or arbitrary dynamic Python. These use Python fallback.
 
-Definite-assignment analysis is deliberately conservative. Some safe functions, especially variables first assigned inside loops or branches, will still fall back.
+Definite-assignment analysis is deliberately conservative. It understands branches that always `return`, `break` or `continue` (so `elif` chains with early returns compile), but variables first assigned inside a loop body are not considered assigned after the loop, and such functions fall back.
 
 Integer `//` and `%` preserve Python's negative-number semantics. Intermediate integer overflow falls back even if a later operation would bring the result back into range. Floats use normal f64 operations without reassociation/fast-math; tests cover NaN, infinities and signed zero. Exact NaN payloads and bitwise reproducibility across hardware are not guaranteed.
 
@@ -114,6 +114,8 @@ During background preparation, normal calls execute Python instead of waiting. B
 Default fallback preserves the original Python return value/exception. `fallback=False` raises `OptimizationError` on rejection or native guard failure and is useful for benchmarks. It also raises while background compilation is pending.
 
 Every native loop iteration consumes a configurable shared budget (`max_iterations=10_000_000` by default). Exceeding it falls back to Python; this limits time spent in an uninterruptible native loop, but is not a hard wall-clock timeout. It does not make an infinite Python function terminate.
+
+**Budget exhaustion replays the whole call in Python, so it loses the speedup.** Measured with a 12,000,000-iteration loop: plain Python 0.450 s, default budget 0.384 s (native work discarded, then Python replay), `max_iterations=10**9` 0.015 s. Raise `max_iterations` for functions with known large loops, and watch `report()['fallback_reasons']` for `native iteration budget exceeded`.
 
 ## Profile existing code
 
@@ -143,9 +145,13 @@ python -m pyrust_engine cache --days 30 --delete    # Remove old entries
 
 Or call `prune_cache(path, older_than_days=30, dry_run=True)`. Age is based on metadata creation/rebuild time, not last access. Lock files are retained to avoid cross-process races. Windows may retain in-use DLLs; deletion errors are reported. A cache is a performance optimization, not required data.
 
+## Call overhead
+
+Each call pays for argument checks, metrics and a `ctypes` dispatch. Plain positional calls take a fast path that skips `inspect.Signature.bind`; keyword calls and calls that rely on defaults take the slower binding path. Measured on Linux with `add(a, b)`: plain Python ~40 ns, positional ~2.0 µs, keyword ~4.3 µs (it was ~5.3 µs for every call in 0.2.0). Decorate functions that do substantial work per call.
+
 ## Evaluation
 
-See **VALIDATION.md** and **benchmarks/results.json** for measured results, full timing samples and limitations. The updated suite compares Python, PyRust, Numba (if installed), vectorized NumPy for the array task, and a complete JSON/array pipeline. Cold compilation and cache startup are reported separately. The original single benchmark is retained in `examples/benchmark.py`.
+See **VALIDATION.md**, **benchmarks/results.json** (0.2.0 run) and **benchmarks/results-v0.3.0.json** (0.3.0 run) for measured results, full timing samples and limitations. The updated suite compares Python, PyRust, Numba (if installed), vectorized NumPy for the array task, and a complete JSON/array pipeline. Cold compilation and cache startup are reported separately. The original single benchmark is retained in `examples/benchmark.py`.
 
 Do not use the largest speedup as an application-wide claim. Numba/NumPy can beat this prototype. Tiny functions can be dramatically slower under the wrapper. Benchmark your workload before adopting it.
 
@@ -159,18 +165,25 @@ No Rust crates or PyO3/Maturin are needed. Compiled libraries run in-process. Ru
 
 ## Push to GitHub
 
-No repository has been pushed from this session. From the extracted folder, with Git and GitHub CLI installed:
+This folder is already a Git repository with history (0.1.0 → 0.2.0 → 0.3.0; the earlier standalone review is on branch `review-fixes-v0.2.0`). From the extracted folder, with Git and GitHub CLI installed:
 
 ```sh
-git init -b main
-git add .
-git commit -m "Add PyRust Engine 0.2 with typed kernels and validation"
 gh auth login
 gh repo create pyrust-engine --private --source=. --remote=origin --push
+git push origin --all
 ```
 
 For an existing empty remote, use `git remote add origin YOUR_REPOSITORY_URL` and `git push -u origin main`. Select a license before publishing publicly; none has been chosen on your behalf.
 
 ## Remaining work
 
-Real Windows/macOS CI execution; production load testing; richer type inference; safe array output kernels; imported-module hotspot analysis; profiler-guided automatic dispatch decisions; benchmarks against Cython, PyPy and Codon; stronger generated-program differential testing. These are not implemented or claimed as completed.
+Real Windows/macOS CI execution; production load testing; richer type inference; safe array output kernels; imported-module hotspot analysis; profiler-guided automatic dispatch decisions; benchmarks against Cython, PyPy and Codon; generated-program fuzzing for array kernels; lower-overhead dispatch (CPython extension instead of ctypes). These are not implemented or claimed as completed.
+
+## Testing
+
+```sh
+python -m unittest discover -s tests -v
+PYRUST_FUZZ_PROGRAMS=500 PYRUST_FUZZ_SEED=7 python -m unittest tests.test_fuzz   # larger generated-program run
+```
+
+`tests/test_fuzz.py` generates random integer and float programs in the supported subset (including `while`, `break`, `continue`, `elif`, `//`, `%`, `/`) and requires identical results or exception types natively and in CPython. Every generated program must compile natively, so the fuzz test cannot pass by silently falling back.

@@ -1,5 +1,5 @@
 name: Tests
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
@@ -15,9 +15,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
       - run: rustc --version
       - run: python -m pip install ".[arrays]"
       - run: python -m unittest discover -s tests -v
+      - name: Larger generated-program fuzz run
+        env:
+          PYRUST_FUZZ_PROGRAMS: '150'
+        run: python -m unittest tests.test_fuzz -v
       - run: python -m examples.benchmark_suite --output benchmarks/ci-results.json
       - uses: actions/upload-artifact@v4
         with:
