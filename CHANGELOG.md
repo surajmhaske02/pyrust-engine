@@ -17,6 +17,8 @@ Merges the independent review of 0.1.0 into the 0.2.0 feature release.
   float programs, including `while`/`break`/`continue`; floats compared by `repr`.
 - 13 new tests (47 total). README documents call overhead and iteration-budget cost.
 - CI: installs a Rust toolchain explicitly and runs a larger fuzz pass.
+- README rewritten around comparison tables (vs Python, Numba, NumPy, Cython, PyPy,
+  Codon, and across versions) with a generated benchmark chart (`docs/`).
 
 # 0.2.0
 

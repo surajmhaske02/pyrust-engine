@@ -1,60 +1,163 @@
-# PyRust Engine 0.3
+# PyRust Engine
 
-A typed Python-to-Rust middleware prototype. Decorate supported computational functions with `@optimize`; the engine compiles them into native Rust libraries and keeps Python fallback for unsupported inputs, syntax, and native guard failures.
+[![Tests](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml/badge.svg)](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml)
+![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue)
+![Status](https://img.shields.io/badge/status-experimental-orange)
 
-**This is not a general Python compiler or a production-ready replacement for Python.** Profiling finds candidates; it does not rewrite entire applications. Native acceleration is useful for substantial computation. Small functions can become much slower because of dispatch overhead.
-
-## Install and test
-
-Requires Python 3.10+ and `rustc` with Rust 2021 support on PATH. Install Rust from https://rustup.rs. Windows also needs the appropriate linker/build tools. Scalar kernels need no third-party Python runtime package. Array support requires NumPy.
-
-```sh
-python -m pip install ".[arrays]"
-python -m unittest discover -s tests -v
-python -m examples.benchmark_suite --output benchmarks/my-results.json
-```
-
-For optional Numba comparisons:
-
-```sh
-python -m pip install ".[benchmark]"
-python -m examples.benchmark_suite --output benchmarks/my-results.json
-```
-
-These are **local installation commands**. The package has not been published to PyPI.
-
-## Integer and float kernels
-
-Save functions in a `.py` file so their source can be inspected.
+**Add one decorator, and PyRust compiles a numeric Python function to native Rust. Results stay identical to Python: anything it can't run exactly falls back to Python.**
 
 ```python
 from pyrust_engine import optimize
 
 @optimize
-# Unannotated parameters default to the integer specialization.
-def calculate(n: int) -> int:
+def weighted_sum(n: int) -> int:
     total = 0
     for i in range(n):
-        total += i * i
+        if i % 7 == 0:
+            total += i // 3
+        else:
+            total += i % 11
     return total
 
-print(calculate(1_000_000))
-print(calculate.report())
+weighted_sum(500_000)        # first call compiles (~0.2 s), then runs natively
+weighted_sum(500_000)        # ~27x faster than plain Python on our benchmark
+weighted_sum.report()        # native/fallback counts, timings, fallback reasons
+```
+
+> **Status: experimental prototype.** Not a general Python compiler and not production-hardened. Tested on Linux only so far; Windows and macOS run in CI.
+
+## Comparison at a glance
+
+| | Plain Python | **PyRust 0.3** | Numba | NumPy (vectorised) |
+|---|---|---|---|---|
+| Integer loop (500k) | 25.5 ms · 1× | **0.93 ms · 27.5×** | 0.59 ms · 43.4× | n/a |
+| Float recurrence (300k) | 7.21 ms · 1× | **1.51 ms · 4.8×** | 1.75 ms · 4.1× | n/a |
+| Array kernel (100k float64) | 5.91 ms · 1× | **0.144 ms · 40.9×** | 0.056 ms · 105× | 0.066 ms · 90× |
+| Tiny `add(a, b)` per call | 0.034 µs · 1× | 2.08 µs · 0.016× | 0.11 µs · 0.30× | n/a |
+| JSON → array pipeline | 5.93 ms · 1× | **4.40 ms · 1.35×** | not measured | n/a |
+| Big integers / overflow | Exact | **Exact (replays in Python)** | Wraps at 64 bits | Wraps at 64 bits |
+| Unsupported code | Runs | **Runs in Python, reason logged** | Compile error | n/a |
+| Extra runtime dependencies | None | **None** (NumPy for arrays) | numba, llvmlite | numpy |
+| First call (compile) | None | 0.15–0.18 s (0.05 s from disk cache) | 0.03–0.49 s | None |
+
+<sub>Speed numbers are "time · speedup vs Python". Full method, raw data and caveats under [How it compares](#how-it-compares).</sub>
+
+## Version comparison
+
+| | 0.1.0 | 0.2.0 | **0.3.0 (current)** |
+|---|---|---|---|
+| Types | `int` | `int`, `float`, NumPy `float64` arrays | `int`, `float`, NumPy `float64` arrays |
+| Arithmetic | `+ - *` | `+ - * // % /` | `+ - * // % /`, unary `+` |
+| Loops | `range(stop)`, `range(start, stop)` | all `range` forms, `while`, `break`, `continue` | same |
+| Branches | `if` / `else` | `if` / `else` | `if` / `elif` / `else` with early returns, `break`/`continue` in branches |
+| Conditions | single comparison | single comparison, `and` / `or` / `not` | chained `a < b < c`, truthiness, float vs int literal |
+| Final `return` required | Yes | Yes | No (missing return replays in Python) |
+| Per-call overhead (`add(a, b)`) | 3.3 µs | 5.3 µs | **2.0 µs** |
+| Cache | per-user disk cache | hashed, cross-process locked, self-repairing | same |
+| Tools | `report()` | + `prepare`, `reset`, metrics, profiler CLI, cache pruning | same |
+| Automated tests | 12 | 34 | **47** |
+| Random testing | 100 rounds of fixed kernels | 12,000+ comparisons on fixed templates | **+ 32,000 generated-program comparisons, 0 mismatches** |
+
+---
+
+## Why it exists
+
+Most "make Python fast" tools ask you to give something up: a new interpreter, a build step, a different integer model, or a heavy dependency. PyRust takes a narrower bet:
+
+- **Correctness first.** Integers stay arbitrary-precision. If a 64-bit operation would overflow, divide by zero, index out of bounds or hit an invalid `range` step, the native call stops and **the original Python function is replayed**, so you get exactly Python's result or Python's exception. Nothing wraps silently.
+- **Opt-in, per function.** Decorate the hot loop, leave everything else alone. Unsupported code, inputs or environments run as normal Python and the reason is recorded.
+- **Light footprint.** Pure-Python package with no runtime dependencies (NumPy only for array kernels). Uses `rustc` directly through `ctypes`: no PyO3, Maturin, crates or C compiler toolchain beyond Rust's own linker.
+
+## How it compares
+
+### Speed
+
+![Speedup versus plain Python](docs/benchmark-speedup.svg)
+
+| Workload | Python | **PyRust** | Numba | NumPy (vectorised) | PyRust vs Python |
+|---|---:|---:|---:|---:|---:|
+| Integer loop (`//`, `%`, branches; n = 500k) | 25.5 ms | **0.93 ms** | 0.59 ms | — | **27.5× faster** |
+| Float recurrence (n = 300k) | 7.21 ms | **1.51 ms** | 1.75 ms | — | **4.8× faster** |
+| Array kernel, sum of squares (100k float64) | 5.91 ms | **0.144 ms** | 0.056 ms | 0.066 ms | **40.9× faster** |
+| Tiny function `add(a, b)`, per call | 0.034 µs | 2.08 µs | 0.11 µs | — | **61× slower** |
+| JSON → NumPy → kernel → JSON pipeline | 5.93 ms | **4.40 ms** | — | — | **1.35× faster** |
+
+<sub>Median of 7 warm runs, wrapper and argument conversion included. Linux x86_64, CPython 3.13.18, Rust 1.97.0, NumPy 2.5.4, Numba 0.68.1 (`fastmath=False`). Raw samples: [`benchmarks/results-v0.3.0.json`](benchmarks/results-v0.3.0.json). Reproduce with `python -m examples.benchmark_suite`.</sub>
+
+**How to read this, honestly:**
+
+- PyRust gives **large speedups on loop-heavy numeric code** and beat Numba on the float recurrence in this run.
+- **Numba is faster** on the integer and array kernels, and **vectorised NumPy** is the better tool when the problem is a whole-array expression.
+- **Tiny functions get slower.** Each native call costs about 2 µs of dispatch. Decorate functions that do real work per call.
+- **End-to-end gains shrink** when parsing and conversion dominate: the JSON pipeline only improved 1.35×.
+
+### Startup cost
+
+| Workload | PyRust: first call incl. Rust compile | PyRust: first call from disk cache | Numba: first call incl. JIT |
+|---|---:|---:|---:|
+| Integer loop | 0.175 s | 0.047 s | 0.488 s |
+| Float recurrence | 0.183 s | 0.062 s | 0.044 s |
+| Array kernel | 0.179 s | 0.049 s | 0.095 s |
+
+PyRust caches compiled libraries on disk across processes. Use `fn.prepare()` (or `prepare(background=True)`) before latency-sensitive work.
+
+### Design trade-offs
+
+Speed was only measured against Numba and NumPy. The rows for Cython, PyPy and Codon describe how each tool is designed, not benchmark results.
+
+| | **PyRust** | Numba | Cython | PyPy | Codon |
+|---|---|---|---|---|---|
+| How you use it | Decorator on a function | Decorator on a function | Separate build step (`.pyx` or annotated `.py`) | Different Python interpreter | Separate compiler |
+| Integer overflow | **Exact Python result** (replays in Python) | Wraps at 64 bits | Python ints exact; C-typed ints follow C rules (optional overflow checks) | Exact | Wraps at 64 bits |
+| Unsupported code | Runs as normal Python, reason recorded | Compile error | Compiles via the C API (slower paths) | Runs everything | Compile error |
+| Scope | Small numeric subset | Large NumPy-oriented subset | Full Python | Full Python | Large Python-like subset |
+| Runtime dependencies | None (NumPy for arrays) | numba + llvmlite | None after build | Whole runtime | Codon runtime |
+| Toolchain needed | `rustc` | none extra | C compiler | none extra | Codon |
+| Maturity | Experimental | Mature | Mature | Mature | Active project |
+
+**Pick PyRust** when you want Python-exact integer semantics, a silent safety net and no compiled dependency stack, and your hot spots are plain numeric loops. **Pick Numba or NumPy** for maximum speed on array maths. **Pick Cython** when you need to compile large or object-heavy code. **Pick PyPy** to speed up a whole pure-Python application.
+
+## Correctness evidence
+
+- **47 automated tests** covering semantics, overflow replay, exceptions, NaN, ±0.0, infinities, array layouts, bounds, cache corruption and recovery, cross-process locking, background compilation, threads and profiling.
+- **Generated-program fuzzing:** 4,000 random programs (2,000 integer + 2,000 float, using `while`, `break`, `continue`, `elif`, `//`, `%`, `/`), **32,000 calls compared with CPython, 0 mismatches**. Floats are compared by `repr`, so NaN and signed zero must match exactly. Every generated program must compile natively, so the test can't pass by quietly falling back to Python.
+- **Fuzzer sensitivity:** deliberately planted bugs (wrong modulo sign; `a / b` rewritten as `a * (1/b)`) were caught immediately.
+
+Details and limitations: [`VALIDATION.md`](VALIDATION.md).
+
+## Install
+
+Requires **Python 3.10+** and **Rust** (`rustc` on `PATH`, from <https://rustup.rs>). Not yet on PyPI.
+
+```sh
+git clone https://github.com/surajmhaske02/pyrust-engine.git
+cd pyrust-engine
+python -m pip install ".[arrays]"          # NumPy for array kernels
+python -m unittest discover -s tests -v    # 47 tests
+python -m examples.benchmark_suite         # add ".[benchmark]" for Numba comparison
+```
+
+Without Rust, everything still works in plain Python; `report()` says why.
+
+## Usage
+
+### Integer and float kernels
+
+Save functions in a `.py` file (source must be inspectable). Annotations pick native types: unannotated or `int` means signed 64-bit integer; `float` means f64.
+
+```python
+from pyrust_engine import optimize
 
 @optimize
 def recurrence(n: int, value: float) -> float:
     for i in range(n):
         value = (value * 1.000001 + 0.0001) / 1.000002
     return value
-
-print(recurrence(100_000, 1.0))
 ```
 
-Annotations select native parameter types. `int` accepts exact built-in Python integers fitting signed 64 bits; `float` accepts exact built-in Python floats. Passing an int to a float parameter falls back rather than silently coercing it. Unsupported annotations also fall back. Boolean values and integer subclasses do not enter integer kernels.
+Arguments must be exact `int` (fitting 64 bits) or exact `float`. Anything else, including `bool`, int subclasses or an int passed to a `float` parameter, runs in Python. A local variable keeps one type: start a float accumulator at `0.0`, not `0`.
 
-All paths must return the same inferred scalar type. Return annotations do not coerce results. Local variables cannot change type: initialize a float accumulator as `0.0`, not `0`.
-
-## Array kernels with no input copy
+### NumPy arrays without copying
 
 ```python
 import numpy as np
@@ -68,122 +171,98 @@ def energy(values: F64Array) -> float:
         total += x * x
     return total
 
-values = np.arange(100_000, dtype=np.float64)
-print(energy(values))
+energy(np.arange(100_000, dtype=np.float64))
 ```
 
-Native array inputs must be exact NumPy `ndarray` objects, one-dimensional, aligned, C-contiguous, and native-endian `float64`. Both writable and read-only arrays are accepted, but kernels only **read** them. Strided arrays, different dtypes and ndarray subclasses fall back without conversion or copying. Array outputs and array writes are not implemented.
+Accepted arrays: exact `ndarray`, 1-D, C-contiguous, aligned, native-endian `float64`. Others fall back without copying. Kernels only read arrays. Use `float(values[i])` for element reads; negative indices work and out-of-bounds reads raise Python's `IndexError` via replay.
 
-Use **`float(values[i])`** for element reads. This explicitly gives Python float arithmetic on the Python path and avoids silently changing NumPy scalar warnings/error settings. Plain `values[i]` expressions are outside the subset. Negative indices work; bounds errors replay in Python to preserve its exception.
-
-Keep inputs alive and do not mutate, resize or free their buffers concurrently with a native call. The wrapper retains argument references, but cannot prevent another thread from mutating an array. ctypes releases the GIL.
-
-## Supported syntax
+### Supported syntax
 
 | Construct | Native support |
 |---|---|
-| Scalar parameters | `int`, `float`; unannotated defaults to `int` |
-| Arrays | `F64Array`, `len(a)`, `float(a[i])`; read-only operations |
-| Integer operations | `+`, `-`, `*`, unary `-`/`+`, `//`, `%`, checked overflow |
-| Float operations | `+`, `-`, `*`, unary `-`/`+`, `/`; no fast-math flags |
-| Mixed int/float arithmetic | `+`, `-`, `*`, `/` when at least one operand is float |
-| Conversion | Explicit built-in `float(scalar)` |
-| Conditions | Comparisons of same-type scalars, including chained `a < b < c`; float vs integer literal with \|literal\| ≤ 2**53 (`if x > 0:`); `and`, `or`, `not`; truthiness `if n:` / `if x:` |
-| Loops | `range(stop)`, `range(start, stop[, step])`, including negative steps; `while` |
-| Control flow | Nested loops, `if`/`elif`/`else`, `break`, `continue`, `pass` |
-| Local variables | Ordinary/annotated assignment and supported augmented operations |
-| Return | Scalar returns of one type; early returns allowed; a path that falls off the end replays in Python (returning `None`, as the original does) |
+| Parameters | `int` (default), `float`, `F64Array` |
+| Integer ops | `+ - *`, unary `- +`, `//` and `%` with Python floor semantics; overflow-checked |
+| Float ops | `+ - * /`, unary `- +`; mixed int/float promotes like Python; no fast-math |
+| Loops | `for` over `range(stop)`, `range(start, stop)`, `range(start, stop, step)` (negative steps too); `while`; `break`; `continue` |
+| Branches | `if` / `elif` / `else`, early `return` |
+| Conditions | Comparisons incl. chained `a < b < c`; float vs int literal (`x > 0`); `and`, `or`, `not`; truthiness `if n:` |
+| Locals | Assignment, annotated assignment, `+= -= *= //= %= /=` |
+| Calls | `len(array)`, `float(x)`, `float(array[i])` |
 
-Not supported: integer `/`, float `//` or `%`, powers, comparisons between int and float variables, general calls, lists, dictionaries, strings, classes, array writes, array outputs, recursion, closures, generators, async, loop `else`, exceptions in native source, or arbitrary dynamic Python. These use Python fallback.
+These run as normal Python instead: lists, dicts, strings, other calls, `**`, recursion, closures, generators, classes, array writes. Variables first assigned inside a loop aren't treated as assigned after it, which is conservative by design.
 
-Definite-assignment analysis is deliberately conservative. It understands branches that always `return`, `break` or `continue` (so `elif` chains with early returns compile), but variables first assigned inside a loop body are not considered assigned after the loop, and such functions fall back.
-
-Integer `//` and `%` preserve Python's negative-number semantics. Intermediate integer overflow falls back even if a later operation would bring the result back into range. Floats use normal f64 operations without reassociation/fast-math; tests cover NaN, infinities and signed zero. Exact NaN payloads and bitwise reproducibility across hardware are not guaranteed.
-
-## Prepare, background compilation and retry
+### Control and diagnostics
 
 ```python
-calculate.prepare()                  # Blocking precompilation, before serving requests
-calculate.prepare(background=True)   # Starts preparation in a daemon thread
-calculate.reset()                    # Clear wrapper compilation state; retain metrics/cache
-calculate.prepare()                  # Retry after fixing compiler/cache environment
+fn.prepare()                    # compile now
+fn.prepare(background=True)     # compile in a thread; calls use Python meanwhile
+fn.reset()                      # clear compile state and retry
+fn.report()                     # calls, native/fallback counts, timings, fallback_reasons
+fn.rust_source()                # inspect the generated Rust
+fn.python(...)                  # call the original function
+
+@optimize(fallback=False)            # raise OptimizationError instead of falling back (good for benchmarks)
+@optimize(max_iterations=10**9)      # native loop budget (default 10,000,000)
 ```
 
-During background preparation, normal calls execute Python instead of waiting. Background work ends if the process exits. `reset()` waits for active background preparation before clearing state; concurrent calls already holding a native library can finish safely. Use a new wrapper if function code or defaults were changed. Mutation of code, builtins, defaults or input buffers concurrently with execution is outside the supported contract.
+> **Iteration budget:** a call that exceeds `max_iterations` discards its native work and **replays the whole call in Python**, losing the speedup. With 12M iterations: Python 0.450 s, default budget 0.384 s, `max_iterations=10**9` 0.015 s. Raise it for known large loops; watch `report()['fallback_reasons']`.
 
-Default fallback preserves the original Python return value/exception. `fallback=False` raises `OptimizationError` on rejection or native guard failure and is useful for benchmarks. It also raises while background compilation is pending.
-
-Every native loop iteration consumes a configurable shared budget (`max_iterations=10_000_000` by default). Exceeding it falls back to Python; this limits time spent in an uninterruptible native loop, but is not a hard wall-clock timeout. It does not make an infinite Python function terminate.
-
-**Budget exhaustion replays the whole call in Python, so it loses the speedup.** Measured with a 12,000,000-iteration loop: plain Python 0.450 s, default budget 0.384 s (native work discarded, then Python replay), `max_iterations=10**9` 0.015 s. Raise `max_iterations` for functions with known large loops, and watch `report()['fallback_reasons']` for `native iteration budget exceeded`.
-
-## Profile existing code
+### Find candidates in existing code
 
 ```sh
-python -m pyrust_engine profile path/to/your_script.py arg1 arg2
+python -m pyrust_engine profile path/to/script.py arg1 arg2   # runs the script once (trusted code only)
+python -m pyrust_engine cache --days 30                       # list old cache entries (add --delete)
 ```
 
-This **executes the trusted script once**, ranks functions in that entry script by self time, and reports which retained top-level functions match the compiler subset. Script output goes to stderr; the profile is JSON on stdout. Use a representative workload. Decorate suitable functions after reviewing the report. Imported-module functions, closures, and whole-application automatic rewriting/selection are not implemented. Compatibility is static; actual runtime inputs still undergo guards.
+The profiler ranks functions in the entry script by time and reports which ones fit the native subset. It never rewrites your code.
 
-## Metrics and cache management
+## How it works
 
-`fn.report()` includes:
+```
+Python source ─► AST check & type inference ─► Rust source (checked i64 / f64 ops)
+      ─► rustc --crate-type cdylib (cached, hashed, locked) ─► ctypes call
+      ─► status 0: return native result
+      ─► status ≠ 0 (overflow, ÷0, bounds, budget, no return): replay original Python
+```
 
-- `calls`, `native_calls` (native attempts, including guard failures), `fallback_calls`, and `fallback_rate`.
-- Reasons counted separately, plus the latest reason and a persistent compilation error field.
-- Compilation/preparation time, native execution time, Python fallback time, and whole-wrapper time.
-- Average native/fallback timings, cache hit/rebuild status and compilation attempts.
+The supported subset has no side effects, so replaying a call is always safe. Generated Rust never contains raw user text: identifiers are mapped to internal names and only allowed AST nodes are translated.
 
-Native timing excludes argument conversion; whole-wrapper timing includes it and compilation. Times can overlap across threads and are not application wall time. Failed argument binding still counts as a wrapper call. Counter updates are synchronized; reports are diagnostic snapshots, not a transactional audit log.
+## Safety
 
-Cache entries use compiler/platform/source keys, SHA-256 content checks, OS cross-process locks and atomic publication. Invalid metadata/binary hashes trigger a rebuild. Missing symbols and load failures attempt one rebuild for cached entries, then fall back. The cache must be private; on POSIX it must be owned by the current user and not group/world writable. Hashes detect corruption, not a malicious cache owner.
+- Run **trusted code only**. Compiled libraries run inside your process; this is not a sandbox.
+- Keep the cache private (it must be owned by you and not group/world-writable on POSIX).
+- Long native loops can't be interrupted by Ctrl-C until they finish or hit the iteration budget.
+- Don't mutate arrays, function code or builtins concurrently with a running call.
+
+## Project layout
+
+```
+pyrust_engine/   compiler.py (AST → Rust), runtime.py (decorator, dispatch, metrics),
+                 cache.py (disk cache, locks), profiling.py, __main__.py (CLI)
+tests/           test_engine.py, test_v2.py, test_v3.py, test_fuzz.py (generated programs)
+examples/        benchmark_suite.py (Python / PyRust / Numba / NumPy), benchmark.py
+benchmarks/      raw benchmark results (0.2.0 and 0.3.0 runs)
+docs/            benchmark chart and the script that generates it
+```
+
+Regenerate the chart after a new benchmark run:
 
 ```sh
-python -m pyrust_engine cache --days 30             # Dry-run list
-python -m pyrust_engine cache --days 30 --delete    # Remove old entries
+python -m examples.benchmark_suite --output benchmarks/my-results.json
+python docs/make_chart.py benchmarks/my-results.json docs/benchmark-speedup.svg
 ```
 
-Or call `prune_cache(path, older_than_days=30, dry_run=True)`. Age is based on metadata creation/rebuild time, not last access. Lock files are retained to avoid cross-process races. Windows may retain in-use DLLs; deletion errors are reported. A cache is a performance optimization, not required data.
+## Roadmap
 
-## Call overhead
+- Results from Windows/macOS CI and ARM hardware
+- Lower call overhead (a CPython extension instead of `ctypes`)
+- Array outputs and writes; more array element types
+- Calls between optimized functions
+- Benchmarks against Cython, PyPy and Codon
+- Generated-program fuzzing for array kernels
 
-Each call pays for argument checks, metrics and a `ctypes` dispatch. Plain positional calls take a fast path that skips `inspect.Signature.bind`; keyword calls and calls that rely on defaults take the slower binding path. Measured on Linux with `add(a, b)`: plain Python ~40 ns, positional ~2.0 µs, keyword ~4.3 µs (it was ~5.3 µs for every call in 0.2.0). Decorate functions that do substantial work per call.
+See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
-## Evaluation
+## License
 
-See **VALIDATION.md**, **benchmarks/results.json** (0.2.0 run) and **benchmarks/results-v0.3.0.json** (0.3.0 run) for measured results, full timing samples and limitations. The updated suite compares Python, PyRust, Numba (if installed), vectorized NumPy for the array task, and a complete JSON/array pipeline. Cold compilation and cache startup are reported separately. The original single benchmark is retained in `examples/benchmark.py`.
-
-Do not use the largest speedup as an application-wide claim. Numba/NumPy can beat this prototype. Tiny functions can be dramatically slower under the wrapper. Benchmark your workload before adopting it.
-
-CI is configured for Linux/macOS/Windows and Python 3.10/3.12/3.13, but only locally executed environments listed in VALIDATION.md are verified. Remote CI has not run.
-
-## Architecture and trust boundary
-
-Python source → typed AST validation → Rust `Result<T, i32>` code → rustc cdylib → ctypes dispatch. Native status codes trigger Python replay for integer overflow, zero division/range step, bounds failure or loop-budget exhaustion. Supported native code has no external writes, so replay does not duplicate external side effects.
-
-No Rust crates or PyO3/Maturin are needed. Compiled libraries run in-process. Run only trusted Python; this is not a sandbox for user uploads. Debuggers/tracers, monkey-patching races, native memory faults and externally corrupted libraries are not covered by Python fallback. No formal equivalence proof or production security review has been performed.
-
-## Push to GitHub
-
-This folder is already a Git repository with history (0.1.0 → 0.2.0 → 0.3.0; the earlier standalone review is on branch `review-fixes-v0.2.0`). From the extracted folder, with Git and GitHub CLI installed:
-
-```sh
-gh auth login
-gh repo create pyrust-engine --private --source=. --remote=origin --push
-git push origin --all
-```
-
-For an existing empty remote, use `git remote add origin YOUR_REPOSITORY_URL` and `git push -u origin main`. Select a license before publishing publicly; none has been chosen on your behalf.
-
-## Remaining work
-
-Real Windows/macOS CI execution; production load testing; richer type inference; safe array output kernels; imported-module hotspot analysis; profiler-guided automatic dispatch decisions; benchmarks against Cython, PyPy and Codon; generated-program fuzzing for array kernels; lower-overhead dispatch (CPython extension instead of ctypes). These are not implemented or claimed as completed.
-
-## Testing
-
-```sh
-python -m unittest discover -s tests -v
-PYRUST_FUZZ_PROGRAMS=500 PYRUST_FUZZ_SEED=7 python -m unittest tests.test_fuzz   # larger generated-program run
-```
-
-`tests/test_fuzz.py` generates random integer and float programs in the supported subset (including `while`, `break`, `continue`, `elif`, `//`, `%`, `/`) and requires identical results or exception types natively and in CPython. Every generated program must compile natively, so the fuzz test cannot pass by silently falling back.
+No license has been chosen yet. Until one is added, all rights are reserved by the author. Add a `LICENSE` file before inviting outside use or contributions.
