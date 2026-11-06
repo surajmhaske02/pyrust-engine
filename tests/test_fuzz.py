@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import unittest
 
-from pyrust_engine import optimize
+from tests.support import optimize
 
 RUST = bool(shutil.which('rustc'))
 INT_CONSTANTS = [0, 1, 2, 3, 7, 100, 2 ** 31, 2 ** 62, 2 ** 63 - 1]
@@ -183,7 +183,7 @@ class GeneratedProgramFuzz(unittest.TestCase):
         gen = Generator(rng, floats=floats)
         programs = [gen.program(i) for i in range(count)]
         arg_pool = FLOAT_ARGS if floats else INT_ARGS
-        with tempfile.TemporaryDirectory() as work:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
             name = f'pyrust_fuzz_{"f" if floats else "i"}_{seed}'
             path = os.path.join(work, name + '.py')
             with open(path, 'w') as fh:

@@ -3,7 +3,8 @@ import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
-from pyrust_engine import optimize, OptimizationError
+from pyrust_engine import OptimizationError
+from tests.support import optimize
 
 @optimize
 def square_sum(n):
@@ -96,7 +97,7 @@ class Semantics(unittest.TestCase):
         self.assertIn('checked_mul', square_sum.rust_source())
     @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
     def test_native_and_cache(self):
-        with tempfile.TemporaryDirectory() as cache:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache:
             fn = optimize(branches.python, fallback=False, cache_dir=cache)
             self.assertEqual(fn(100), branches.python(100))
             self.assertEqual(fn.report()['native_calls'], 1)

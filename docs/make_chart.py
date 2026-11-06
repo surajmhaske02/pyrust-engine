@@ -4,7 +4,8 @@ src, dst = sys.argv[1], sys.argv[2]
 d = json.load(open(src))
 LABELS = {'integer_loop': 'Integer loop', 'float_recurrence': 'Float recurrence',
           'array_energy': 'Array kernel (100k)', 'tiny_scalar': 'Tiny add(a, b)',
-          'json_array_pipeline': 'JSON → array pipeline'}
+          'json_array_pipeline': 'JSON → array pipeline',
+          'tiny_scalar_forced_native': 'Tiny add, forced native'}
 SERIES = [('pyrust', 'PyRust', 's1', 'circle')]
 rows = []
 for r in d['results']:
@@ -50,7 +51,12 @@ for t in [0.01, 0.1, 1, 10, 100]:
     o.append(f'<line class="{cls}" x1="{x(t):.1f}" x2="{x(t):.1f}" y1="{top-6}" y2="{ybot}"/>')
     lbl = {0.01: '0.01×', 0.1: '0.1×', 1: '1× = Python', 10: '10×', 100: '100×'}[t]
     o.append(f'<text class="t2" x="{x(t):.1f}" y="{ybot+18}" text-anchor="middle">{lbl}</text>')
-o.append(f'<text class="t2" x="{W-right}" y="{ybot+38}" text-anchor="end">Log scale · median of 7 warm runs · Linux x86_64, Python 3.13, Rust 1.97 · PyRust 0.3.0</text>')
+env = d.get('environment', {})
+plat = env.get('platform', '').split('-')
+plat = f"{plat[0]} {platform_arch}" if (platform_arch := next((p for p in plat if p in ('x86_64', 'arm64', 'aarch64', 'AMD64')), '')) else plat[0]
+rust = ' '.join(env.get('rust', 'rustc ?').split()[:2]).replace('rustc', 'Rust')
+version = sys.argv[3] if len(sys.argv) > 3 else ''
+o.append(f'<text class="t2" x="{W-right}" y="{ybot+38}" text-anchor="end">Log scale · median of 7 warm runs · {plat}, Python {env.get("python", "?")}, {rust}{" · PyRust " + version if version else ""}</text>')
 for i, (name, vals) in enumerate(rows):
     y0 = top + i * row_h
     o.append(f'<text class="lab" x="20" y="{y0 + row_h/2 + 4:.1f}">{name}</text>')

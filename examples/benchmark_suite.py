@@ -37,25 +37,28 @@ def run():
         numba=None
     rng=np.random.default_rng(73)
     array=rng.standard_normal(100_000)
-    jobs=[('integer_loop',integer_work,(500_000,),1),
-          ('float_recurrence',float_work,(300_000,1.0),1),
-          ('array_energy',array_energy,(array,),1),
-          ('tiny_scalar',scalar_add,(12,19),1000)]
+    jobs=[('integer_loop',integer_work,(500_000,),1,{}),
+          ('float_recurrence',float_work,(300_000,1.0),1,{}),
+          ('array_energy',array_energy,(array,),1,{}),
+          # Default: loop-free functions run as plain Python (no dispatch overhead).
+          ('tiny_scalar',scalar_add,(12,19),1000,{}),
+          # Forced native: shows the raw ctypes dispatch cost per call.
+          ('tiny_scalar_forced_native',scalar_add,(12,19),1000,{'native_loop_free':True})]
     rows=[]
-    with tempfile.TemporaryDirectory() as cache:
-        for name,fn,args,batch in jobs:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache:
+        for name,fn,args,batch,options in jobs:
             expected=fn(*args)
-            native=optimize(fn,cache_dir=cache,fallback=False)
+            native=optimize(fn,cache_dir=cache,fallback=False,**options)
             start=time.perf_counter();actual=native(*args);first=time.perf_counter()-start
             same(expected,actual)
             py=measure(fn,args,batch=batch)
             rust=measure(native,args,batch=batch)
             row={'name':name,'python':py,'pyrust':rust,'pyrust_first_call_seconds':first,
                  'python_over_pyrust':py['median_seconds']/rust['median_seconds'],'report':native.report()}
-            again=optimize(fn,cache_dir=cache,fallback=False)
+            again=optimize(fn,cache_dir=cache,fallback=False,**options)
             start=time.perf_counter();same(expected,again(*args))
             row['disk_cache_first_call_seconds']=time.perf_counter()-start
-            if numba is not None:
+            if numba is not None and name!='tiny_scalar_forced_native':
                 # fastmath disabled; no Python big-int semantics claimed for Numba.
                 jitted=numba.njit(fn,fastmath=False)
                 start=time.perf_counter();same(expected,jitted(*args))

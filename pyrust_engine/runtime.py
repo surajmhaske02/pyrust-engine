@@ -1,4 +1,5 @@
 """Typed native dispatch, explicit preparation/retry, and synchronized metrics."""
+import ast
 import builtins
 from collections import Counter
 import ctypes
@@ -8,6 +9,7 @@ import inspect
 import platform
 import shutil
 import subprocess
+import textwrap
 import threading
 import time
 import types
@@ -21,7 +23,55 @@ _STATUS = {1:'integer overflow',2:'zero divisor or zero range step',3:'array ind
 class OptimizationError(RuntimeError):
     pass
 
-def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, max_iterations=10_000_000):
+LOOP_FREE_REASON=('loop-free function: a native call costs more than the work it saves, '
+                  'so it runs as plain Python (pass native_loop_free=True to force Rust)')
+
+def _is_loop_free(fn):
+    """True when the function body has no for/while loop.
+
+    Such a function does a fixed, tiny amount of work per call, so the ~2 us ctypes
+    dispatch can never pay for itself. Unknown source is treated as not loop-free.
+    """
+    try:
+        tree=ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    except (OSError,TypeError,SyntaxError,IndentationError):
+        return False
+    if not tree.body or not isinstance(tree.body[0],(ast.FunctionDef,ast.AsyncFunctionDef)):
+        return False
+    return not any(isinstance(node,(ast.For,ast.AsyncFor,ast.While)) for node in ast.walk(tree.body[0]))
+
+def _plain_python(fn,max_iterations):
+    """Zero-overhead result for loop-free functions: a real Python function, not a wrapper.
+
+    Calls cost exactly what the original costs. Call counters are not tracked because
+    there is no wrapper to count them.
+    """
+    clone=types.FunctionType(fn.__code__,fn.__globals__,fn.__name__,fn.__defaults__,fn.__closure__)
+    clone.__kwdefaults__=dict(fn.__kwdefaults__) if fn.__kwdefaults__ else None
+    functools.update_wrapper(clone,fn)
+
+    def report():
+        return {'backend':'python','reason':LOOP_FREE_REASON,'compile_error':None,'native_calls':0,
+                'fallback_calls':0,'calls':0,'cache_hit':False,'cache_rebuilt':False,'compile_seconds':0.0,
+                'native_seconds':0.0,'fallback_seconds':0.0,'wrapper_seconds':0.0,'compile_attempts':0,
+                'fallback_reasons':{},'fallback_rate':0.0,'native_average_seconds':None,
+                'fallback_average_seconds':None,'dispatch':'python-direct','call_counting':False}
+
+    def prepare(*,background=False):
+        return report()
+
+    clone.python=fn;clone.report=report;clone.prepare=prepare;clone.reset=report
+    clone.rust_source=lambda:Compiler(fn,max_iterations).generate()
+    return clone
+
+def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, max_iterations=10_000_000,
+             native_loop_free=False):
+    """Compile a numeric Python function to Rust, falling back to Python when needed.
+
+    native_loop_free: loop-free functions (no for/while) run as plain Python by default,
+    because native dispatch overhead (~2 us) is larger than their work. Set True to
+    compile them anyway (for example to test the native path).
+    """
     if backend!='rust':
         raise ValueError('Only backend="rust" is supported')
     if type(max_iterations) is not int or not 1<=max_iterations<2**64:
@@ -29,6 +79,8 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
     def decorate(fn):
         if not isinstance(fn,types.FunctionType):
             raise TypeError('Decorate an ordinary Python function')
+        if not native_loop_free and _is_loop_free(fn):
+            return _plain_python(fn,max_iterations)
         signature=inspect.signature(fn)
         original=(fn.__code__,fn.__defaults__,fn.__kwdefaults__)
         compile_lock=threading.RLock();metrics_lock=threading.Lock()
@@ -56,6 +108,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
             data['fallback_rate']=data['fallback_calls']/calls if calls else 0.0
             data['native_average_seconds']=data['native_seconds']/data['native_calls'] if data['native_calls'] else None
             data['fallback_average_seconds']=data['fallback_seconds']/data['fallback_calls'] if data['fallback_calls'] else None
+            data['dispatch']='wrapper';data['call_counting']=True
             return data
 
         def python_call(reason,args,kwargs):

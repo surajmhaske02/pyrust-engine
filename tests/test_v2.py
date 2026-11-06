@@ -13,7 +13,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from pyrust_engine import optimize, OptimizationError, prune_cache
+from pyrust_engine import OptimizationError, prune_cache
+from tests.support import optimize
 from pyrust_engine.profiling import profile_script
 from tests import kernels as k
 
@@ -33,7 +34,7 @@ class Diagnostics(unittest.TestCase):
             self.assertEqual(fn.report()['compile_attempts'],2)
 
     def test_profile_and_cli(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             path=Path(d)/'work.py'
             path.write_text('def work(n):\n    s=0\n    for i in range(n):\n        s+=i\n    return s\nwork(1000)\n')
             report=profile_script(path)
@@ -125,7 +126,7 @@ class Native(unittest.TestCase):
             if not release.wait(5):
                 raise RuntimeError('test release timed out')
             return original(*args)
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             fn=optimize(k.add,cache_dir=d)
             with patch.object(runtime,'compile_library',side_effect=delayed):
                 fn.prepare(background=True)
@@ -156,7 +157,7 @@ class Native(unittest.TestCase):
         self.assertIn('defaults changed',fn.report()['reason'])
 
     def test_corrupt_cache_rebuild(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             fn=optimize(k.add,cache_dir=d,fallback=False);fn.prepare()
             meta=next(Path(d).glob('*.json'))
             # Damage the metadata, never bytes mapped by a running process.
@@ -181,16 +182,17 @@ class Native(unittest.TestCase):
 
     def test_compilation_failures(self):
         for error in (subprocess.TimeoutExpired('rustc',120), RuntimeError('compiler rejected source'), OSError('linker missing')):
-            with tempfile.TemporaryDirectory() as d:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
                 fn=optimize(k.add,cache_dir=d)
                 with patch('pyrust_engine.runtime.compile_library',side_effect=error):
                     self.assertEqual(fn(3,4),7)
                 self.assertEqual(fn.report()['backend'],'python')
                 self.assertIsNotNone(fn.report()['compile_error'])
 
+    @unittest.skipIf(sys.platform=='win32','Windows cannot replace a DLL that is loaded in this process')
     def test_corrupt_binary_rebuild(self):
         from pyrust_engine.cache import digest, SUFFIX
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             fn=optimize(k.add,cache_dir=d,fallback=False);fn.prepare()
             library=next(Path(d).glob('*'+SUFFIX))
             # Atomic replacement leaves existing mapped bytes intact.
@@ -200,11 +202,14 @@ class Native(unittest.TestCase):
             self.assertEqual(again(5,6),11)
             self.assertTrue(again.report()['cache_rebuilt'])
             meta=json.loads(next(Path(d).glob('*.json')).read_text())
-            self.assertEqual(digest(library),meta['sha256'])
+            # Builds are not byte-identical on every platform (macOS embeds a build UUID),
+            # so the rebuilt library may have a new content-addressed name.
+            rebuilt=library.with_name(library.name.split('-')[0]+'-'+meta['sha256']+SUFFIX)
+            self.assertEqual(digest(rebuilt),meta['sha256'])
 
     def test_process_cache_contention(self):
-        with tempfile.TemporaryDirectory() as d:
-            script='from tests.kernels import add; from pyrust_engine import optimize; import json,sys; f=optimize(add,cache_dir=sys.argv[1],fallback=False); assert f(2,3)==5; print(json.dumps(f.report()))'
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            script='from tests.kernels import add; from pyrust_engine import optimize; import json,sys; f=optimize(add,cache_dir=sys.argv[1],fallback=False,native_loop_free=True); assert f(2,3)==5; print(json.dumps(f.report()))'
             children=[subprocess.Popen([sys.executable,'-c',script,d],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(4)]
             reports=[]
             for child in children:

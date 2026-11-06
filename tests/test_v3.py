@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from pyrust_engine import optimize
+from tests.support import optimize
 from tests import kernels as k
 
 RUST = bool(shutil.which('rustc'))
