@@ -1,0 +1,320 @@
+{
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.39",
+    "rust": "rustc 1.75.0 (82e1608df 2023-12-21) (built from a source tarball)",
+    "numpy": "2.5.4",
+    "numba": "0.68.1"
+  },
+  "method": "7 warm samples; median; wrapper/conversion costs included; cold startup separate; tiny scalar batched 1000 calls/sample",
+  "limitations": "One machine; controlled workloads; not production load testing. No Cython/PyPy/Codon comparison.",
+  "results": [
+    {
+      "name": "integer_loop",
+      "python": {
+        "median_seconds": 0.03961848099970666,
+        "min_seconds": 0.035927968000123656,
+        "samples_seconds": [
+          0.04461965300015436,
+          0.035927968000123656,
+          0.04320678099975339,
+          0.038400340000407596,
+          0.043000093000046036,
+          0.03961848099970666,
+          0.03871325199997955
+        ]
+      },
+      "pyrust": {
+        "median_seconds": 0.0017198149998876033,
+        "min_seconds": 0.0014139029999569175,
+        "samples_seconds": [
+          0.0026698749998104176,
+          0.0017011649997584755,
+          0.0014139029999569175,
+          0.0026009420002992556,
+          0.0018359919999966223,
+          0.0017149770001196885,
+          0.0017198149998876033
+        ]
+      },
+      "pyrust_first_call_seconds": 0.7938487170004009,
+      "python_over_pyrust": 23.036478343482226,
+      "report": {
+        "backend": "rust",
+        "reason": null,
+        "compile_error": null,
+        "native_calls": 8,
+        "fallback_calls": 0,
+        "calls": 8,
+        "cache_hit": false,
+        "cache_rebuilt": false,
+        "compile_seconds": 0.7923084310000377,
+        "native_seconds": 0.013811797999096598,
+        "fallback_seconds": 0.0,
+        "wrapper_seconds": 0.8074597300001187,
+        "compile_attempts": 1,
+        "fallback_reasons": {},
+        "fallback_rate": 0.0,
+        "native_average_seconds": 0.0017264747498870747,
+        "fallback_average_seconds": null
+      },
+      "disk_cache_first_call_seconds": 0.09389921399997547,
+      "numba_first_call_seconds": 0.9873820739999246,
+      "numba": {
+        "median_seconds": 0.0009960739998859935,
+        "min_seconds": 0.0007038020003165002,
+        "samples_seconds": [
+          0.0007038020003165002,
+          0.0012346530002105283,
+          0.0008030989997678262,
+          0.0007042659999569878,
+          0.0024462009996568668,
+          0.0012179079999441456,
+          0.0009960739998859935
+        ]
+      },
+      "pyrust_over_numba_time": 1.7265936065838945
+    },
+    {
+      "name": "float_recurrence",
+      "python": {
+        "median_seconds": 0.014443995999954495,
+        "min_seconds": 0.013012771000376233,
+        "samples_seconds": [
+          0.014091761000145198,
+          0.01503526199985572,
+          0.014443995999954495,
+          0.01415825499998391,
+          0.016132916000060504,
+          0.013012771000376233,
+          0.016116891999899963
+        ]
+      },
+      "pyrust": {
+        "median_seconds": 0.002512869000383944,
+        "min_seconds": 0.002355810000153724,
+        "samples_seconds": [
+          0.00332039699969755,
+          0.002512869000383944,
+          0.002355810000153724,
+          0.002445160999741347,
+          0.0023985120001270843,
+          0.0043883470002583636,
+          0.0028641409999181633
+        ]
+      },
+      "pyrust_first_call_seconds": 0.8683648900000662,
+      "python_over_pyrust": 5.74800994311585,
+      "report": {
+        "backend": "rust",
+        "reason": null,
+        "compile_error": null,
+        "native_calls": 8,
+        "fallback_calls": 0,
+        "calls": 8,
+        "cache_hit": false,
+        "cache_rebuilt": false,
+        "compile_seconds": 0.8656885350001176,
+        "native_seconds": 0.022478215998944506,
+        "fallback_seconds": 0.0,
+        "wrapper_seconds": 0.8886335520001012,
+        "compile_attempts": 1,
+        "fallback_reasons": {},
+        "fallback_rate": 0.0,
+        "native_average_seconds": 0.0028097769998680633,
+        "fallback_average_seconds": null
+      },
+      "disk_cache_first_call_seconds": 0.05384610700002668,
+      "numba_first_call_seconds": 0.07231591199979448,
+      "numba": {
+        "median_seconds": 0.002712010999857739,
+        "min_seconds": 0.0023220909997689887,
+        "samples_seconds": [
+          0.0026807220001501264,
+          0.0035529850001694285,
+          0.0023220909997689887,
+          0.002562169000157155,
+          0.002772182000171597,
+          0.003133089999664662,
+          0.002712010999857739
+        ]
+      },
+      "pyrust_over_numba_time": 0.9265703570213242
+    },
+    {
+      "name": "array_energy",
+      "python": {
+        "median_seconds": 0.011806822999915312,
+        "min_seconds": 0.010004941999795847,
+        "samples_seconds": [
+          0.010004941999795847,
+          0.011521470999923622,
+          0.011993120000170165,
+          0.01008110700013276,
+          0.011806822999915312,
+          0.015119644000151311,
+          0.012873099999978876
+        ]
+      },
+      "pyrust": {
+        "median_seconds": 0.00028593400020326953,
+        "min_seconds": 0.0002293210000061663,
+        "samples_seconds": [
+          0.0006446930001402507,
+          0.00039895800000522286,
+          0.0002716829999371839,
+          0.00028593400020326953,
+          0.00036033400010637706,
+          0.0002293210000061663,
+          0.00024765799980741576
+        ]
+      },
+      "pyrust_first_call_seconds": 0.5003386769999452,
+      "python_over_pyrust": 41.29212682479831,
+      "report": {
+        "backend": "rust",
+        "reason": null,
+        "compile_error": null,
+        "native_calls": 8,
+        "fallback_calls": 0,
+        "calls": 8,
+        "cache_hit": false,
+        "cache_rebuilt": false,
+        "compile_seconds": 0.4999726589999227,
+        "native_seconds": 0.002026662999924156,
+        "fallback_seconds": 0.0,
+        "wrapper_seconds": 0.5027645149998534,
+        "compile_attempts": 1,
+        "fallback_reasons": {},
+        "fallback_rate": 0.0,
+        "native_average_seconds": 0.0002533328749905195,
+        "fallback_average_seconds": null
+      },
+      "disk_cache_first_call_seconds": 0.0448253909999039,
+      "numba_first_call_seconds": 0.12274635299991132,
+      "numba": {
+        "median_seconds": 7.967600004121778e-05,
+        "min_seconds": 6.767299964849371e-05,
+        "samples_seconds": [
+          7.189699999798904e-05,
+          0.00011637400029940181,
+          7.967600004121778e-05,
+          6.767299964849371e-05,
+          0.0003745280000657658,
+          0.00016980999998850166,
+          6.97139998919738e-05
+        ]
+      },
+      "pyrust_over_numba_time": 3.588709273248543,
+      "numpy_vectorized": {
+        "median_seconds": 6.550900025104056e-05,
+        "min_seconds": 5.699500025002635e-05,
+        "samples_seconds": [
+          0.0001642430001993489,
+          6.550900025104056e-05,
+          5.699500025002635e-05,
+          0.0002697219997571665,
+          8.461000015813624e-05,
+          5.9359999795560725e-05,
+          5.704299974240712e-05
+        ]
+      }
+    },
+    {
+      "name": "tiny_scalar",
+      "python": {
+        "median_seconds": 3.609199984566658e-08,
+        "min_seconds": 3.567399971871055e-08,
+        "samples_seconds": [
+          1.0530800000196905e-07,
+          3.694399993037223e-08,
+          3.6742999782291006e-08,
+          3.567399971871055e-08,
+          3.5798000226350266e-08,
+          3.609199984566658e-08,
+          3.597099976104801e-08
+        ]
+      },
+      "pyrust": {
+        "median_seconds": 7.491782999750285e-06,
+        "min_seconds": 7.013677000031748e-06,
+        "samples_seconds": [
+          7.491782999750285e-06,
+          7.030635000319308e-06,
+          7.013677000031748e-06,
+          7.141659999888361e-06,
+          8.903213999928995e-06,
+          8.910377000120207e-06,
+          7.8557090000686e-06
+        ]
+      },
+      "pyrust_first_call_seconds": 0.42624100200009707,
+      "python_over_pyrust": 0.004817544748275489,
+      "report": {
+        "backend": "rust",
+        "reason": null,
+        "compile_error": null,
+        "native_calls": 7001,
+        "fallback_calls": 0,
+        "calls": 7001,
+        "cache_hit": false,
+        "cache_rebuilt": false,
+        "compile_seconds": 0.4261757040003431,
+        "native_seconds": 0.007899560011537687,
+        "fallback_seconds": 0.0,
+        "wrapper_seconds": 0.4782622930224534,
+        "compile_attempts": 1,
+        "fallback_reasons": {},
+        "fallback_rate": 0.0,
+        "native_average_seconds": 1.1283473805938705e-06,
+        "fallback_average_seconds": null
+      },
+      "disk_cache_first_call_seconds": 0.04563403700012714,
+      "numba_first_call_seconds": 0.04552142000011372,
+      "numba": {
+        "median_seconds": 1.6691200016794028e-07,
+        "min_seconds": 1.1858600009873044e-07,
+        "samples_seconds": [
+          3.3672399968054377e-07,
+          7.123020000108226e-07,
+          1.6691200016794028e-07,
+          1.1858600009873044e-07,
+          5.367379999370314e-07,
+          1.6350700025213882e-07,
+          1.578880001034122e-07
+        ]
+      },
+      "pyrust_over_numba_time": 44.88462778118019
+    },
+    {
+      "name": "json_array_pipeline",
+      "python": {
+        "median_seconds": 0.008285510999940016,
+        "min_seconds": 0.007889671999691927,
+        "samples_seconds": [
+          0.008113617000162776,
+          0.007889671999691927,
+          0.009748086999934458,
+          0.00795754599994325,
+          0.008731695000278705,
+          0.009449204999782523,
+          0.008285510999940016
+        ]
+      },
+      "pyrust": {
+        "median_seconds": 0.006219205999968835,
+        "min_seconds": 0.006059129999812285,
+        "samples_seconds": [
+          0.006186148999859142,
+          0.006219205999968835,
+          0.008258755000042584,
+          0.006059129999812285,
+          0.006294460999924922,
+          0.006183255999985704,
+          0.0066011109997816675
+        ]
+      },
+      "python_over_pyrust": 1.332245788285761
+    }
+  ]
+}
