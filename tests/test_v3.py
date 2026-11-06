@@ -134,14 +134,16 @@ class NewSyntax(unittest.TestCase):
         self.check(float_vs_int_literal, [(x,) for x in
                    (0.0, -0.0, 1.5, -5.0, 2.0 ** 53, 2.0 ** 53 + 2, float('nan'), float('inf'))])
 
-    def test_int_literal_above_2_53_is_not_converted(self):
+    def test_int_literal_above_2_53_compares_exactly(self):
         def too_big(x: float):
-            if x < 9007199254740993:  # 2**53 + 1 is not exactly representable
+            if x < 9007199254740993:  # 2**53 + 1 is not exactly representable as a float
                 return 1
             return 0
         fn = optimize(too_big)
-        self.assertEqual(fn(2.0 ** 53), 1)
-        self.assertEqual(fn.report()['backend'], 'python')
+        # 0.3-0.5 ran this in Python; 0.6 compares int and float exactly, like CPython.
+        for x in (2.0 ** 53, 2.0 ** 53 + 2, float('nan'), float('inf'), -1.0):
+            self.assertEqual(fn(x), too_big(x), x)
+        self.assertEqual(fn.report()['backend'], 'rust')
 
     def test_unary_plus(self):
         self.check(unary_plus, [(3, 2.5), (-4, -0.0)])

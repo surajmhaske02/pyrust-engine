@@ -1,5 +1,20 @@
 # Validation
 
+## 0.4.0 to 0.6.0: CI on three operating systems, 6 November 2026
+
+From 0.4.0 on, every push runs the full test suite in GitHub Actions on **Linux, Windows and macOS**, each with **Python 3.10, 3.12 and 3.13** (9 jobs), with Rust stable. Each job also runs a larger generated-program fuzz pass (`PYRUST_FUZZ_PROGRAMS=150`) and the benchmark suite, and uploads the benchmark results as an artifact.
+
+| Release | Tests | Result | What was added to the evidence |
+|---|---:|---|---|
+| 0.4.0 | 56 | 9/9 jobs passed | Loop-free functions run as plain Python; fixed two test-only failures on Windows (loaded DLLs can't be deleted or replaced) and macOS (Rust builds aren't byte-identical) |
+| 0.5.0 | 89 | 9/9 jobs passed | Edge-case tests for every new operator and `math` function; extended fuzzer with `**`, bit operations, `abs`/`min`/`max`, ternaries, float `//` `%` `**`, `int()`, `math.floor/ceil` and nine `math` functions, compared with CPython on all three operating systems |
+| 0.6.0 | see CI | see CI | Recursion (depth and budget limits), array writes with copy-on-write (failure mid-call, overlapping arrays, read-only arrays), `I64Array`, exact int/float comparisons at 2**53 and 2**63 boundaries, package build check |
+
+Notes:
+
+- `math` functions are compared bit-for-bit with CPython on each operating system. Both call the platform's C math library, which is why results match; on a platform where they didn't, the fuzzer would fail.
+- Benchmark numbers in the README come from the `ubuntu-latest` CI job. Shared CI machines are noisy, so treat them as approximate.
+
 ## 0.3.0 — merge of the 0.2.0 release and the independent review, 6 November 2026
 
 Executed on Linux x86_64, CPython 3.13.18, Rust 1.97.0, NumPy 2.5.4, Numba 0.68.1. Windows and macOS were **not** run; the CI matrix covers them once pushed.
