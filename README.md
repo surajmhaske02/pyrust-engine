@@ -3,6 +3,7 @@
 [![Tests](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml/badge.svg)](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Add one decorator, and PyRust compiles a numeric Python function to native Rust. Results stay identical to Python: anything it can't run exactly falls back to Python.**
 
@@ -265,4 +266,4 @@ See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## License
 
-No license has been chosen yet. Until one is added, all rights are reserved by the author. Add a `LICENSE` file before inviting outside use or contributions.
+[MIT](LICENSE) © 2026 Suraj Mhaske
