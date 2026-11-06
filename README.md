@@ -10,9 +10,11 @@
 Put `@optimize` above a function. PyRust turns that function into Rust, compiles it and runs it as native machine code. You keep writing normal Python, and **your answers never change**: anything PyRust can't run safely runs as normal Python instead.
 
 - ✍️ **Write plain Python.** No new language, no build step, no rewrite.
-- ⚡ **Get real speed on calculation-heavy code:** math functions, arithmetic, bit operations, helper functions, NumPy arrays and repeated work run about **10× to 120× faster** in our tests.
+- ⚡ **Get real speed on calculation-heavy code:** math functions, arithmetic, bit operations, helper functions, NumPy arrays and repeated work run about **5× to 180× faster** in our tests on Linux, macOS and Windows.
 - 🛟 **Never get a wrong answer.** Big integers, math errors and anything unsupported fall back to normal Python with the exact same result.
 - 🔍 **See what's happening.** `fn.explain()` and a one-time warning tell you which line can't be sped up, and why.
+
+📖 [API reference](docs/API.md) · 📓 [Try it in a notebook](examples/pyrust_vs_python.ipynb) · 🤝 [Contributing](CONTRIBUTING.md) · 📝 [Changelog](CHANGELOG.md)
 
 Good fits: scientific and engineering formulas, finance and statistics, simulations, games and physics, signal processing, hashing and checksums, and number-heavy data processing.
 
@@ -43,42 +45,45 @@ checksum(300_000)                # same answer as plain Python, at native speed
 print(total_distance.explain())  # does it compile? if not, which line and why
 ```
 
-> **Status: experimental prototype.** Not a general Python compiler and not production-hardened. Tests pass in CI on Linux, Windows and macOS (Python 3.10, 3.12, 3.13); published benchmarks are from Linux x86_64.
+> **Status: experimental prototype.** Not a general Python compiler and not production-hardened. Tests pass in CI on Linux, Windows and macOS (Python 3.10, 3.12, 3.13), and benchmarks are published for all three.
 
 ## Comparison at a glance
 
-| | Plain Python | **PyRust 0.5** |
+| | Plain Python | **PyRust 0.6** |
 |---|---|---|
-| Integer loop (500k) | 42.9 ms · 1× | **1.20 ms · 35.8×** |
-| Float recurrence (300k) | 20.0 ms · 1× | **1.83 ms · 11.0×** |
-| Array kernel (100k float64) | 12.0 ms · 1× | **0.157 ms · 76.6×** |
-| `math.sqrt` / `sin` / `log` loop (300k) · *new in 0.5* | 52.1 ms · 1× | **4.94 ms · 10.5×** |
-| Helper function called in a loop (300k) · *new in 0.5* | 57.3 ms · 1× | **0.85 ms · 67.7×** |
-| Bit-mixing hash with `^ & << >> **` (300k) · *new in 0.5* | 91.3 ms · 1× | **0.75 ms · 121×** |
-| Tiny `add(a, b)` per call | 0.076 µs · 1× | **0.076 µs · 1.0×** (runs as plain Python) |
-| JSON → array pipeline | 9.12 ms · 1× | **6.83 ms · 1.34×** |
+| Integer loop (500k) | 43.0 ms · 1× | **1.20 ms · 35.9×** |
+| Float recurrence (300k) | 21.8 ms · 1× | **1.82 ms · 12.0×** |
+| Array kernel, read (100k float64) | 12.9 ms · 1× | **0.174 ms · 73.8×** |
+| Write into an output array (100k) · *new in 0.6* | 44.1 ms · 1× | **0.247 ms · 179×** |
+| Recursive `fib(25)` · *new in 0.6* | 9.71 ms · 1× | **0.642 ms · 15.1×** |
+| `math.sqrt` / `sin` / `log` loop (300k) | 52.2 ms · 1× | **4.92 ms · 10.6×** |
+| Helper function called in a loop (300k) | 57.7 ms · 1× | **0.848 ms · 68.1×** |
+| Bit-mixing hash with `^ & << >> **` (300k) | 94.8 ms · 1× | **0.754 ms · 126×** |
+| Tiny `add(a, b)` per call | 0.069 µs · 1× | **0.059 µs · ≈1×** (runs as plain Python) |
+| JSON → array pipeline | 9.20 ms · 1× | **6.72 ms · 1.37×** |
 | Big integers / overflow / math errors | Exact | **Exact (replays in Python)** |
 | Unsupported code | Runs | **Runs in Python, with a warning that says which line** |
 | Extra runtime dependencies | None | **None** (NumPy for arrays) |
-| First call (compile) | None | 0.10–0.11 s (0.02 s from disk cache) |
+| First call (compile) | None | 0.10–0.16 s (0.02 s from disk cache) |
 
-<sub>"time · speedup vs Python", measured by CI on a GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Rows marked *new in 0.5* ran as plain Python (1×) in 0.4 and earlier. Full method and raw data under [How it compares](#how-it-compares).</sub>
+<sub>"time · speedup vs Python", measured by CI on a GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Rows marked *new in 0.6* ran as plain Python (1×) in 0.5 and earlier. macOS and Windows numbers are under [Speed on every platform](#speed-on-every-platform).</sub>
 
 ## Version comparison
 
-| | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 | **0.5.0 (current)** |
-|---|---|---|---|---|---|
-| Types | `int` | + `float`, NumPy `float64` arrays | same | same | same |
-| Arithmetic | `+ - *` | + `// % /` | + unary `+` | same | **+ `**`, `& \| ^ ~ << >>`, float `//` `%`, int `/` int** |
-| Builtins | — | `len`, `float` | same | same | **+ `abs`, `min`, `max`, `int`, `pow`** |
-| `math` module | — | — | — | — | **`sqrt exp log sin cos tan atan …`, `floor ceil`, `isnan`, `pi e inf`** |
-| Calling other functions | — | — | — | — | **Yes: compiled into the same library** |
-| Other syntax | `for`, `if` | + `while`, `break`, `continue`, `and/or/not` | + `elif`, chained compares, truthiness | same | **+ `x if c else y`, `while True`, global constants** |
-| Tiny `add(a, b)` per call | 3.3 µs | 5.3 µs | 2.0 µs | ≈ Python speed | ≈ Python speed |
-| Developer tools | `report()` | + `prepare`, `reset`, profiler, cache CLI | same | + `native_loop_free` | **+ `explain()`, fallback warnings with line numbers, `check` CLI** |
-| Automated tests | 12 | 34 | 47 | 56 | **89** |
-| CI platforms passing | — | — | Linux | Linux, Windows, macOS | Linux, Windows, macOS |
-| Random program testing | — | fixed templates | 4,000 programs | same | **+ programs using every 0.5 feature** |
+| | 0.1 | 0.2 | 0.3 | 0.4 | 0.5 | **0.6 (current)** |
+|---|---|---|---|---|---|---|
+| Types | `int` | + `float`, `float64` arrays | same | same | same | **+ `int64` arrays** |
+| Arithmetic | `+ - *` | + `// % /` | + unary `+` | same | + `**`, `& \| ^ ~ << >>`, float `//` `%` | same |
+| Builtins and `math` | — | `len`, `float` | same | same | + `abs min max int pow`, `math.*` | same |
+| Calling other functions | — | — | — | — | Yes | **+ recursion** |
+| Arrays | — | read | read | read | read | **read and write** |
+| Comparisons | single | + `and/or/not` | + chained, truthiness | same | same | **+ exact int vs float** |
+| Other syntax | `for`, `if` | + `while`, `break`, `continue` | + `elif` | same | + ternary, `while True`, globals | **+ functions returning `None`** |
+| Tiny `add(a, b)` per call | 3.3 µs | 5.3 µs | 2.0 µs | ≈ Python | ≈ Python | ≈ Python |
+| Developer tools | `report()` | + `prepare`, `reset`, profiler | same | + `native_loop_free` | + `explain()`, warnings, `check` | **+ type hints, API docs** |
+| Automated tests | 12 | 34 | 47 | 56 | 89 | **112** |
+| CI platforms passing | — | — | Linux | all three | all three | all three **+ package build** |
+| Published benchmarks | Linux | Linux | Linux | Linux | Linux | **Linux, macOS, Windows** |
 
 ---
 
@@ -86,14 +91,14 @@ print(total_distance.explain())  # does it compile? if not, which line and why
 
 Python is slow for a few specific reasons. PyRust removes some of them for the code it compiles. Others need a different tool, and it's better to know which is which.
 
-| Why Python is slow | Example | PyRust 0.5 |
+| Why Python is slow | Example | PyRust 0.6 |
 |---|---|---|
 | Every operation is interpreted one bytecode at a time | `for` / `while` loops | ✅ Compiled to native machine code |
 | Every number is a heap object with a type check | `total += i * i` | ✅ Plain 64-bit ints and floats in CPU registers |
-| Function calls are expensive | a helper called inside a loop | ✅ Helpers are compiled into the same native code (0.5) |
+| Function calls are expensive | a helper called inside a loop, recursion | ✅ Helpers and recursive functions are compiled into the same native code (0.5, 0.6) |
 | Math functions go through Python objects | `math.sqrt(x)`, `x ** 0.5` | ✅ Native calls, same results (0.5) |
 | Bit manipulation creates new int objects | hashing, `x ^ (x >> 13)` | ✅ Native bit operations (0.5) |
-| Indexing arrays goes through NumPy objects | `float(a[i])` in a loop | ✅ Reads the array memory directly |
+| Indexing arrays goes through NumPy objects | `float(a[i])`, `out[i] = x` in a loop | ✅ Reads and writes array memory directly (writes in 0.6) |
 | Crossing into native code has a fixed cost | tiny functions called millions of times | ⚠️ ~2 µs per native call; tiny loop-free functions skip it |
 | The GIL stops threads running Python in parallel | CPU-bound threads | ⚠️ Native calls release the GIL (ctypes), but there are no parallel loops yet |
 | Lists, dicts, strings and objects are dynamic | text processing, JSON, classes | ❌ Not compiled. Use the right library, PyPy or CPython's JIT |
@@ -113,36 +118,56 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ![Speedup versus plain Python](docs/benchmark-speedup.svg)
 
-| Workload | Python | **PyRust 0.5** | PyRust vs Python |
+| Workload | Python | **PyRust 0.6** | PyRust vs Python |
 |---|---:|---:|---:|
-| Integer loop (`//`, `%`, branches; n = 500k) | 42.9 ms | **1.20 ms** | **35.8× faster** |
-| Float recurrence (n = 300k) | 20.0 ms | **1.83 ms** | **11.0× faster** |
-| Array kernel, sum of squares (100k float64) | 12.0 ms | **0.157 ms** | **76.6× faster** |
-| `math.sqrt(x) * math.sin(x) + math.log(x)` loop (n = 300k) | 52.1 ms | **4.94 ms** | **10.5× faster** |
-| Helper `distance(x, y)` called inside a loop (n = 300k) | 57.3 ms | **0.85 ms** | **67.7× faster** |
-| Bit-mixing hash with `^ & << >> **` (n = 300k) | 91.3 ms | **0.75 ms** | **121× faster** |
-| Tiny function `add(a, b)`, per call (default) | 0.076 µs | **0.076 µs** | **same speed** (plain Python) |
-| Tiny function `add(a, b)`, forced native | 0.061 µs | 3.80 µs | 62× slower |
-| JSON → NumPy → kernel → JSON pipeline | 9.12 ms | **6.83 ms** | **1.34× faster** |
+| Integer loop (`//`, `%`, branches; n = 500k) | 43.0 ms | **1.20 ms** | **35.9× faster** |
+| Float recurrence (n = 300k) | 21.8 ms | **1.82 ms** | **12.0× faster** |
+| Array kernel, sum of squares (100k float64) | 12.9 ms | **0.174 ms** | **73.8× faster** |
+| Smoothing filter writing an output array (100k) | 44.1 ms | **0.247 ms** | **179× faster** |
+| Recursive `fib(25)` | 9.71 ms | **0.642 ms** | **15.1× faster** |
+| `math.sqrt(x) * math.sin(x) + math.log(x)` loop (n = 300k) | 52.2 ms | **4.92 ms** | **10.6× faster** |
+| Helper `distance(x, y)` called inside a loop (n = 300k) | 57.7 ms | **0.848 ms** | **68.1× faster** |
+| Bit-mixing hash with `^ & << >> **` (n = 300k) | 94.8 ms | **0.754 ms** | **126× faster** |
+| Tiny function `add(a, b)`, per call (default) | 0.069 µs | **0.059 µs** | **same speed** (plain Python) |
+| Tiny function `add(a, b)`, forced native | 0.068 µs | 4.00 µs | 59× slower |
+| JSON → NumPy → kernel → JSON pipeline | 9.20 ms | **6.72 ms** | **1.37× faster** |
 
-<sub>Median of 7 warm runs, wrapper and argument conversion included. Measured by CI on a GitHub Actions `ubuntu-latest` runner: Linux x86_64, CPython 3.13.18, Rust 1.99.1, NumPy 2.5.4. Shared CI machines are noisy, so treat these as approximate. Raw samples: [`benchmarks/results-v0.5.0-ci-ubuntu.json`](benchmarks/results-v0.5.0-ci-ubuntu.json); older runs are in [`benchmarks/`](benchmarks/). Workloads are in [`examples/workloads.py`](examples/workloads.py). Reproduce with `python -m examples.benchmark_suite`.</sub>
+<sub>Median of 7 warm runs, wrapper and argument conversion included. Measured by CI on a GitHub Actions `ubuntu-latest` runner: Linux x86_64, CPython 3.13.18, Rust 1.99.1, NumPy 2.5.4. Shared CI machines are noisy, so treat these as approximate. Raw samples: [`benchmarks/results-v0.6.0-ci-linux.json`](benchmarks/results-v0.6.0-ci-linux.json); older runs are in [`benchmarks/`](benchmarks/). Workloads are in [`examples/workloads.py`](examples/workloads.py). Reproduce with `python -m examples.benchmark_suite`.</sub>
+
+### Speed on every platform
+
+Speedup over plain Python, same CI run, Python 3.13 and Rust 1.99 on each GitHub Actions runner:
+
+| Workload | Linux x86_64 | macOS Apple Silicon (arm64) | Windows x86_64 |
+|---|---:|---:|---:|
+| Integer loop | 35.9× | 39.5× | 37.5× |
+| Float recurrence | 12.0× | 5.3× | 8.9× |
+| Array kernel (read) | 73.8× | 37.8× | 69.7× |
+| Write into an output array | 179× | 128× | 152× |
+| Recursive `fib(25)` | 15.1× | 17.0× | 19.9× |
+| `math` functions loop | 10.6× | 15.3× | 15.5× |
+| Helper function in a loop | 68.1× | 87.2× | 61.6× |
+| Bit-mixing hash | 126× | 60.0× | 131× |
+| Tiny `add(a, b)` (runs as Python) | ≈1× | ≈1× | ≈1× |
+| JSON → array pipeline | 1.37× | 1.35× | 1.31× |
+
+<sub>Raw samples: [Linux](benchmarks/results-v0.6.0-ci-linux.json), [macOS](benchmarks/results-v0.6.0-ci-macos.json), [Windows](benchmarks/results-v0.6.0-ci-windows.json). Differences between platforms mostly reflect how fast plain Python is on each machine.</sub>
 
 **How to read this, honestly:**
 
-- PyRust gives **large speedups on number-crunching code**: 36× on the integer loop, 77× on the array kernel and 121× on the bit hash.
-- **New in 0.5:** code using `math` functions, helper functions and bit operations now compiles. In 0.4 those three rows ran as plain Python (1×).
-- Math-heavy code gains less (10.5×), because `sqrt`, `sin` and `log` cost the same in both; PyRust only removes the overhead around them.
+- PyRust gives **large speedups on number-crunching code** on all three platforms: 36–40× on integer loops, 60–131× on bit operations and 128–179× when writing arrays.
+- **New in 0.6:** writing into arrays and recursion now compile. In 0.5 those rows ran as plain Python (1×).
+- Math-heavy code gains less (10–15×), because `sqrt`, `sin` and `log` cost the same in both; PyRust only removes the overhead around them. Float recurrences gain 5–12× for the same reason.
 - **Tiny functions don't get slower.** Loop-free functions run as plain Python (details in [Tiny functions](#tiny-functions-the-problem-and-the-fix)). A function *with* a loop but a very small input still pays about 2–4 µs per call.
-- **End-to-end gains shrink** when parsing and conversion dominate: the JSON pipeline only improved 1.34×.
+- **End-to-end gains shrink** when parsing and conversion dominate: the JSON pipeline only improved about 1.35×.
 
 ### Startup cost
 
-| Workload | First call incl. Rust compile | First call from disk cache |
-|---|---:|---:|
-| Integer loop | 0.110 s | 0.020 s |
-| Float recurrence | 0.101 s | 0.021 s |
-| Array kernel | 0.102 s | 0.020 s |
-| Helper calls in a loop | 0.104 s | 0.020 s |
+| Workload | Linux: first call incl. compile | Linux: from disk cache | macOS: compile / cache | Windows: compile / cache |
+|---|---:|---:|---:|---:|
+| Integer loop | 0.113 s | 0.021 s | 0.196 s / 0.027 s | 0.366 s / 0.051 s |
+| Recursive `fib` | 0.098 s | 0.020 s | 0.134 s / 0.026 s | 0.296 s / 0.048 s |
+| Array write | 0.124 s | 0.020 s | 0.176 s / 0.029 s | 0.334 s / 0.051 s |
 
 PyRust caches compiled libraries on disk across processes. Use `fn.prepare()` (or `prepare(background=True)`) before latency-sensitive work.
 
@@ -198,20 +223,21 @@ Trade-off: a loop-free function has no wrapper, so `report()` can't count its ca
 
 ## Limitations
 
-- **Numeric subset only.** `int` (64-bit, overflow-checked), `float`, read-only 1-D `float64` arrays, `math` functions and calls to other numeric functions. No lists, dicts, strings, tuples, classes, generators or recursion: those run as plain Python.
-- **Mixed int/float comparisons** (`i < x` with an int variable and a float) and `min`/`max` over mixed types aren't compiled, because Python compares them exactly and returns the winning argument's own type.
+- **Numeric subset only.** `int` (64-bit, overflow-checked), `float`, 1-D `float64` / `int64` arrays, `math` functions and calls to other numeric functions (including recursion). No lists, dicts, strings, tuples, classes or generators: those run as plain Python.
+- **`min` / `max` over mixed int and float values** aren't compiled, because Python returns the winning argument with its own type.
+- **Recursion** needs a return annotation (`-> int` / `-> float`) and runs natively up to 300 levels deep; deeper calls replay in Python.
 - **Per-call overhead of ~2–4 µs** for native calls. Loop-free functions avoid it; loops with tiny inputs don't.
-- **First call compiles** (about 0.1 s per function, about 0.02 s from the disk cache). Use `fn.prepare()` ahead of time.
-- **Arrays are read-only.** No array outputs or element writes; only `float64`, 1-D, C-contiguous.
+- **First call compiles** (about 0.1–0.4 s per function depending on the OS, 0.02–0.05 s from the disk cache). Use `fn.prepare()` ahead of time.
+- **Arrays:** only 1-D, C-contiguous `float64` / `int64`. Writing an array copies it once per call (copy-on-write, so failures can be replayed exactly). Only the decorated function itself can write arrays, not helpers it calls.
 - **Needs `rustc` on `PATH`** on every machine that should run natively (no prebuilt wheels).
 - **Native loops can't be interrupted** by Ctrl-C until they finish or hit `max_iterations`.
 - **No parallel loops.** One call uses one CPU core.
-- **Benchmarks come from Linux x86_64.** CI runs every test on Windows and macOS too, but there are no published numbers for those platforms or ARM yet.
+- **Benchmarks come from GitHub's CI machines** (Linux x86_64, macOS arm64, Windows x86_64), which are shared and noisy. There are no numbers for ARM Linux yet.
 - **Experimental.** Not production-hardened, not a sandbox: only run trusted code.
 
 ## Correctness evidence
 
-- **89 automated tests**, passing in CI on Linux, Windows and macOS with Python 3.10, 3.12 and 3.13, covering semantics, every 0.5 operator and `math` function at its edge cases (NaN, ±0.0, ±inf, overflow, domain errors, huge exponents and shifts), calls between functions, rebinding of globals and helpers, overflow replay, exceptions, NaN, ±0.0, infinities, array layouts, bounds, cache corruption and recovery, cross-process locking, background compilation, threads and profiling.
+- **112 automated tests**, passing in CI on Linux, Windows and macOS with Python 3.10, 3.12 and 3.13, covering semantics, recursion (depth and budget limits), array writes (failure halfway through, overlapping and read-only arrays), `int64` arrays, exact int/float comparisons at the 2**53 and 2**63 boundaries, every 0.5 operator and `math` function at its edge cases (NaN, ±0.0, ±inf, overflow, domain errors, huge exponents and shifts), calls between functions, rebinding of globals and helpers, overflow replay, exceptions, NaN, ±0.0, infinities, array layouts, bounds, cache corruption and recovery, cross-process locking, background compilation, threads and profiling.
 - **Generated-program fuzzing:** 4,000 random programs (2,000 integer + 2,000 float, using `while`, `break`, `continue`, `elif`, `//`, `%`, `/`), **32,000 calls compared with CPython, 0 mismatches**. Floats are compared by `repr`, so NaN and signed zero must match exactly. Every generated program must compile natively, so the test can't pass by quietly falling back to Python.
 - **0.5 fuzzing:** a second generator adds `**`, `& | ^ ~ << >>`, `abs`, `min`, `max`, `pow`, ternaries, float `//` `%` `**`, `int()`, `math.floor/ceil` and nine `math` functions. Its programs run on all three operating systems in CI and must match CPython exactly, including which exception is raised.
 - **Fuzzer sensitivity:** deliberately planted bugs (wrong modulo sign; `a / b` rewritten as `a * (1/b)`) were caught immediately.
@@ -226,7 +252,7 @@ Requires **Python 3.10+** and **Rust** (`rustc` on `PATH`, from <https://rustup.
 git clone https://github.com/surajmhaske02/pyrust-engine.git
 cd pyrust-engine
 python -m pip install ".[arrays]"          # NumPy for array kernels
-python -m unittest discover -s tests -v    # 89 tests
+python -m unittest discover -s tests -v    # 112 tests
 python -m examples.benchmark_suite         # add ".[benchmark]" for Numba comparison
 ```
 
@@ -250,43 +276,75 @@ def recurrence(n: int, value: float) -> float:
 
 Arguments must be exact `int` (fitting 64 bits) or exact `float`. Anything else, including `bool`, int subclasses or an int passed to a `float` parameter, runs in Python. A local variable keeps one type: start a float accumulator at `0.0`, not `0`.
 
-### NumPy arrays without copying
+### NumPy arrays: read and write
 
 ```python
 import numpy as np
-from pyrust_engine import optimize, F64Array
+from pyrust_engine import optimize, F64Array, I64Array
 
 @optimize
-def energy(values: F64Array) -> float:
+def energy(values: F64Array) -> float:          # read
     total = 0.0
     for i in range(len(values)):
         x = float(values[i])
         total += x * x
     return total
 
-energy(np.arange(100_000, dtype=np.float64))
+@optimize
+def smooth(values: F64Array, out: F64Array):    # write into an output array (0.6)
+    n = len(values)
+    for i in range(n):
+        left = float(values[i - 1]) if i > 0 else float(values[i])
+        right = float(values[i + 1]) if i < n - 1 else float(values[i])
+        out[i] = (left + 2.0 * float(values[i]) + right) / 4.0
+
+@optimize
+def histogram(labels: I64Array, counts: I64Array, bins: int):   # int64 arrays (0.6)
+    for i in range(len(labels)):
+        counts[int(labels[i]) % bins] += 1
+
+data = np.random.default_rng(0).standard_normal(100_000)
+out = np.empty_like(data)
+energy(data); smooth(data, out)
 ```
 
-Accepted arrays: exact `ndarray`, 1-D, C-contiguous, aligned, native-endian `float64`. Others fall back without copying. Kernels only read arrays. Use `float(values[i])` for element reads; negative indices work and out-of-bounds reads raise Python's `IndexError` via replay.
+Accepted arrays: exact `ndarray`, 1-D, C-contiguous, aligned, native-endian `float64` (`F64Array`) or `int64` (`I64Array`). Others run in Python. Read with `float(a[i])` / `int(a[i])`; write with `a[i] = value`, `a[i] += value`, `-=`, `*=` (and `/=` for floats). Negative indices work; out-of-bounds access raises Python's `IndexError` via replay.
+
+Writes go to a private copy that is copied back only when the whole native call succeeds, so if anything fails halfway, Python re-runs the function on your original data and you see exactly what plain Python would do. Read-only arrays, and written arrays that share memory with another argument, run as plain Python.
+
+### Recursion
+
+```python
+@optimize
+def fib(n: int) -> int:          # the return annotation is required for recursion
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fib(30)                          # ~15-20x faster than plain Python in our benchmarks
+```
+
+Mutual recursion works too. Native recursion goes up to 300 levels deep, and each call counts toward `max_iterations`; deeper or longer runs replay in Python with the same result (including `RecursionError`).
 
 ### Supported syntax
 
 | Construct | Native support |
 |---|---|
-| Parameters | `int` (default), `float`, `F64Array` |
+| Parameters | `int` (default), `float`, `F64Array`, `I64Array` |
 | Integer ops | `+ - *`, unary `- + ~`, `//` and `%` with Python floor semantics, `**` (non-negative exponent), `& \| ^ << >>`; all overflow-checked. `int / int` gives a float like Python |
 | Float ops | `+ - * / // % **`, unary `- +`, using CPython's exact rules for signed zero, NaN, infinities and errors; mixed int/float promotes like Python; no fast-math |
 | Builtins | `abs`, `min(a, b, ...)`, `max(a, b, ...)`, `int(x)`, `float(x)`, `pow(a, b)`, `len(array)` |
 | `math` | `sqrt exp log log2 log10 sin cos tan asin acos atan sinh cosh tanh fabs`, `floor ceil trunc` (return int), `isnan isinf isfinite` (in conditions), `pi e tau inf nan`. Works as `math.sqrt(x)` or `from math import sqrt` |
-| Function calls | Calls to other plain or `@optimize` functions with int/float/array arguments, compiled into the same library. Recursion is not supported |
+| Function calls | Calls to other plain or `@optimize` functions with int/float/array arguments, compiled into the same library. Recursion and mutual recursion with a `-> int` / `-> float` annotation |
 | Globals | Module-level `int` / `float` constants (if one is reassigned later, calls fall back to Python) |
 | Loops | `for` over `range(stop)`, `range(start, stop)`, `range(start, stop, step)` (negative steps too); `while`; `break`; `continue` |
 | Branches | `if` / `elif` / `else`, early `return` |
-| Conditions | Comparisons incl. chained `a < b < c`; float vs int literal (`x > 0`); `and`, `or`, `not`; truthiness `if n:`; `while True`; `a if cond else b` |
+| Conditions | Comparisons incl. chained `a < b < c`; exact int vs float (`i < x`); `and`, `or`, `not`; truthiness `if n:`; `while True`; `a if cond else b` |
 | Locals | Assignment, annotated assignment, `+= -= *= //= %= /=` |
-| Array reads | `float(array[i])`, negative indices, bounds-checked |
+| Arrays | `float(a[i])`, `int(a[i])`, `a[i] = v`, `a[i] += v` (`-= *= /=`), `len(a)`; negative indices; bounds-checked |
+| Returns | One scalar type (`int` or `float`), or no value (`None`) |
 
-These run as normal Python instead: lists, dicts, strings, tuples, recursion, closures, generators, classes, array writes, keyword arguments in calls. Variables first assigned inside a loop aren't treated as assigned after it, which is conservative by design. When something isn't supported, `fn.explain()` and the fallback warning give the line and the code.
+These run as normal Python instead: lists, dicts, strings, tuples, closures, generators, classes, keyword arguments in calls. Variables first assigned inside a loop aren't treated as assigned after it, which is conservative by design. When something isn't supported, `fn.explain()` and the fallback warning give the line and the code.
 
 ### Control and diagnostics
 
@@ -353,12 +411,13 @@ The supported subset has no side effects, so replaying a call is always safe. Ge
 ## Project layout
 
 ```
-pyrust_engine/   compiler.py (AST → Rust), runtime.py (decorator, dispatch, metrics),
-                 cache.py (disk cache, locks), profiling.py, __main__.py (CLI)
-tests/           test_engine.py, test_v2.py … test_v5.py, test_fuzz.py (generated programs)
-examples/        benchmark_suite.py (Python / PyRust / Numba / NumPy), benchmark.py
-benchmarks/      raw benchmark results (0.2.0, 0.3.0, and 0.4.0 / 0.5.0 CI runs)
-docs/            benchmark chart and the script that generates it
+pyrust_engine/   compiler.py (AST → Rust), runtime.py (decorator, dispatch, metrics, typing),
+                 cache.py (disk cache, locks), profiling.py, __main__.py (CLI), py.typed
+tests/           test_engine.py, test_v2.py … test_v6.py, test_fuzz.py (generated programs)
+examples/        pyrust_vs_python.ipynb (try it), benchmark_suite.py, workloads.py
+benchmarks/      raw benchmark results (0.2.0 – 0.6.0; 0.6.0 for Linux, macOS and Windows)
+docs/            API.md (reference), benchmark chart and the script that generates it
+.github/         CI (tests on 3 OSes + package build), PyPI publish workflow, issue templates
 ```
 
 Regenerate the chart after a new benchmark run:
@@ -368,32 +427,29 @@ python -m examples.benchmark_suite --output benchmarks/my-results.json
 python docs/make_chart.py benchmarks/my-results.json docs/benchmark-speedup.svg
 ```
 
-## What's missing for developers (v0.5)
+## What's missing for developers (v0.6)
 
-Done in 0.5: fallback warnings, `fn.explain()`, the `check` command, calls between functions, `**`, `abs`/`min`/`max` and `math` functions. These gaps remain, and contributions are welcome on any of them:
+Done in 0.6: array writes, `int64` arrays, recursion, exact int/float comparisons, type hints (`py.typed`), the [API reference](docs/API.md), the [contributor guide](CONTRIBUTING.md) with issue templates, an updated [notebook](examples/pyrust_vs_python.ipynb), GitHub Releases, and benchmarks for macOS and Windows. These gaps remain:
 
 | Missing | Why it matters to a developer |
 |---|---|
-| **No PyPI package** | You have to `git clone` the repo; `pip install pyrust-engine` doesn't work yet. |
-| **Lists, tuples and array writes** | Code that builds lists or fills an output array still runs as plain Python. |
-| **Needs Rust installed on every machine** | No prebuilt binaries, so every user and server needs `rustc`. |
-| **No type hints / `py.typed`** | Editors and type checkers don't know about `fn.report()`, `fn.explain()` and the other helpers. |
-| **No tutorial notebook or API reference** | There's no step-by-step notebook to try it, and the `report()` fields aren't documented in one place. |
-| **No contributor guide** | No `CONTRIBUTING.md`, issue templates or formatter config, and the dense code style makes first contributions harder. |
-| **No GitHub Releases or macOS/Windows benchmarks** | Tags exist but there are no release notes to read, and speed numbers only cover Linux. |
+| **Not on PyPI yet** | The package builds and passes `twine check` in CI, and a publish workflow is ready, but the PyPI project still has to be set up by its owner. Until then, install from GitHub. |
+| **Needs Rust installed on every machine** | PyRust compiles *your* functions, so `rustc` is needed wherever they should run natively. Without it, code still runs as plain Python. |
+| **Lists, tuples, dicts and strings** | Code that builds lists or returns several values still runs as plain Python. |
+| **2-D arrays and other dtypes** | Only 1-D `float64` / `int64` arrays are compiled. |
+| **Call overhead** | Each native call costs about 2–4 µs, which matters for small inputs called very often. |
 
 ## Roadmap
 
 What needs improving, most impactful first:
 
 1. **Lower native call overhead (2–4 µs → well under 1 µs).** Replace the `ctypes` call with a small CPython extension entry point, and generate a specialised argument checker per function.
-2. **Array outputs and writes** (with copy-on-write so replays stay exact), 2-D arrays, and `float32` / `int64` element types.
-3. **Typed lists and tuples** (`list[float]` arguments, local tuples, multiple return values).
+2. **Typed lists and tuples** (`list[float]` arguments, local tuples, multiple return values).
+3. **2-D arrays** and `float32` / `int32` / `bool` element types.
 4. **Parallel loops** (`prange`) that use every CPU core, since native code already releases the GIL.
 5. **Adaptive dispatch.** Measure native vs Python time for the first calls and route small inputs (e.g. `n = 3`) to Python automatically.
-6. **Prebuilt wheels / PyPI release** so users don't need `rustc` for common cases.
-7. **Mixed int/float comparisons** with Python's exact rules.
-8. **Published benchmarks for macOS (Apple Silicon), Windows and ARM Linux**, and against Cython, PyPy and Codon.
+6. **PyPI release** (waiting on the one-time PyPI setup; see `.github/workflows/publish.yml`).
+7. **Benchmarks on ARM Linux**, and against Cython, PyPy and Codon.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 

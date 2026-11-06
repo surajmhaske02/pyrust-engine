@@ -1,3 +1,28 @@
+# 0.6.0
+
+Recursion, writing into arrays, int64 arrays, exact int/float comparisons, type hints,
+and the docs and tooling for contributors.
+
+- **Recursion**, including mutual recursion, for functions annotated `-> int` or
+  `-> float`. Native recursion is capped at 300 levels and every call between compiled
+  functions spends one unit of `max_iterations`; deeper or longer runs replay in Python.
+- **Array writes:** `a[i] = v`, `a[i] += v`, `-=`, `*=` (and `/=` for `F64Array`).
+  Written arrays use a private copy that is published only when the native call
+  succeeds, so a replay always starts from the original data. Read-only arrays and
+  written arrays that share memory with another argument run in Python.
+- **`I64Array`** parameters: `int(a[i])`, `float(a[i])` and int writes.
+- **Functions without a return value** (Python returns `None`) compile.
+- **Exact int vs float comparisons** between variables (`i < x`), matching CPython at the
+  2**53 and 2**63 boundaries and for NaN and infinities.
+- **Type hints:** `OptimizedFunction` protocol, `optimize()` overloads, `py.typed`.
+- **Docs and tooling:** `docs/API.md`, `CONTRIBUTING.md`, issue and pull request
+  templates, VALIDATION.md for 0.4 to 0.6, and an updated comparison notebook.
+- **CI:** a package job builds the sdist and wheel, runs `twine check --strict` and
+  installs the wheel in a clean environment. A manual "Publish to PyPI" workflow uses
+  trusted publishing (needs a one-time setup on pypi.org).
+- **Benchmarks:** recursive `fib` and an array-writing smoothing kernel; README speed
+  numbers for Linux, macOS (Apple Silicon) and Windows from CI.
+
 # 0.5.0
 
 Much more Python compiles natively, plus tools that tell you why code doesn't.

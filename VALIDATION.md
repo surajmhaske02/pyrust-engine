@@ -8,7 +8,7 @@ From 0.4.0 on, every push runs the full test suite in GitHub Actions on **Linux,
 |---|---:|---|---|
 | 0.4.0 | 56 | 9/9 jobs passed | Loop-free functions run as plain Python; fixed two test-only failures on Windows (loaded DLLs can't be deleted or replaced) and macOS (Rust builds aren't byte-identical) |
 | 0.5.0 | 89 | 9/9 jobs passed | Edge-case tests for every new operator and `math` function; extended fuzzer with `**`, bit operations, `abs`/`min`/`max`, ternaries, float `//` `%` `**`, `int()`, `math.floor/ceil` and nine `math` functions, compared with CPython on all three operating systems |
-| 0.6.0 | see CI | see CI | Recursion (depth and budget limits), array writes with copy-on-write (failure mid-call, overlapping arrays, read-only arrays), `I64Array`, exact int/float comparisons at 2**53 and 2**63 boundaries, package build check |
+| 0.6.0 | 112 | 9/9 test jobs + package build passed | Recursion (depth and budget limits), array writes with copy-on-write (failure mid-call, overlapping arrays, read-only arrays), `I64Array`, exact int/float comparisons at 2**53 and 2**63 boundaries, package build check |
 
 Notes:
 
