@@ -5,7 +5,9 @@ d = json.load(open(src))
 LABELS = {'integer_loop': 'Integer loop', 'float_recurrence': 'Float recurrence',
           'array_energy': 'Array kernel (100k)', 'tiny_scalar': 'Tiny add(a, b)',
           'json_array_pipeline': 'JSON → array pipeline',
-          'tiny_scalar_forced_native': 'Tiny add, forced native'}
+          'tiny_scalar_forced_native': 'Tiny add, forced native',
+          'math_loop': 'math.sqrt/sin/log loop', 'function_calls': 'Helper calls in loop',
+          'bit_hash': 'Bit-mixing hash'}
 SERIES = [('pyrust', 'PyRust', 's1', 'circle')]
 rows = []
 for r in d['results']:

@@ -13,7 +13,7 @@ import tempfile
 import time
 import numpy as np
 from pyrust_engine import optimize
-from .workloads import integer_work,float_work,array_energy,scalar_add
+from .workloads import integer_work,float_work,array_energy,scalar_add,math_work,calls_work,bits_work
 
 def measure(fn,args,repeat=7,batch=1):
     samples=[]
@@ -40,6 +40,9 @@ def run():
     jobs=[('integer_loop',integer_work,(500_000,),1,{}),
           ('float_recurrence',float_work,(300_000,1.0),1,{}),
           ('array_energy',array_energy,(array,),1,{}),
+          ('math_loop',math_work,(300_000,),1,{}),
+          ('function_calls',calls_work,(300_000,),1,{}),
+          ('bit_hash',bits_work,(300_000,),1,{}),
           # Default: loop-free functions run as plain Python (no dispatch overhead).
           ('tiny_scalar',scalar_add,(12,19),1000,{}),
           # Forced native: shows the raw ctypes dispatch cost per call.
