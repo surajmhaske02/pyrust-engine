@@ -16,8 +16,21 @@ class Unsupported(ValueError):
 class F64Array:
     """Annotation for a contiguous, aligned, native-endian 1-D NumPy float64 array.
 
-    Read elements using float(array[index]); native kernels never write the array.
+    Read elements with float(array[index]); write them with array[index] = value.
+    Writes go to a private copy that is published only when the native call succeeds,
+    so a replay in Python always starts from the original data.
     """
+
+class I64Array:
+    """Annotation for a contiguous, aligned, native-endian 1-D NumPy int64 array.
+
+    Read elements with int(array[index]) or float(array[index]); write int values with
+    array[index] = value.
+    """
+
+ARRAY_KINDS = ('array', 'iarray')
+ELEMENT = {'array': 'f64', 'iarray': 'i64'}
+MAX_DEPTH = 300  # native call depth; deeper recursion replays in Python (keeps thread stacks safe)
 
 # Status codes shared with runtime._STATUS.
 #   1 integer overflow          2 zero divisor / zero range step
@@ -115,9 +128,19 @@ fn math1(x:f64,r:f64)->Result<f64,i32>{
     if r.is_infinite() && x.is_finite() {return Err(6)}
     Ok(r)
 }
-fn at(a:&[f64],i:i64)->Result<f64,i32>{
-    let j=if i<0 {(a.len() as i128)+(i as i128)} else {i as i128};
-    if j<0 || j>=a.len() as i128 {Err(3)} else {Ok(a[j as usize])}
+fn index(len:usize,i:i64)->Result<usize,i32>{
+    let j=if i<0 {(len as i128)+(i as i128)} else {i as i128};
+    if j<0 || j>=len as i128 {Err(3)} else {Ok(j as usize)}
+}
+fn at<T:Copy>(a:&[T],i:i64)->Result<T,i32>{Ok(a[index(a.len(),i)?])}
+fn put<T:Copy>(a:&mut [T],i:i64,v:T)->Result<(),i32>{let j=index(a.len(),i)?; a[j]=v; Ok(())}
+fn cmp_if(i:i64,f:f64)->i8{
+    // Exact int-vs-float comparison like CPython: -1 less, 0 equal, 1 greater, 2 NaN.
+    if f.is_nan() {return 2}
+    if f>=9223372036854775808.0 {return -1}
+    if f< -9223372036854775808.0 {return 1}
+    let t=f.trunc(); let ti=t as i64;
+    if i<ti {-1} else if i>ti {1} else {let r=f-t; if r>0.0 {-1} else if r<0.0 {1} else {0}}
 }
 fn tick(fuel:&mut u64)->Result<(),i32>{if *fuel==0 {Err(4)} else {*fuel-=1;Ok(())}}
 '''
@@ -171,9 +194,11 @@ class Compiler:
                 kind = 'f64'
             elif annotation in (F64Array, 'F64Array'):
                 kind = 'array'
+            elif annotation in (I64Array, 'I64Array'):
+                kind = 'iarray'
             else:
                 raise Unsupported(f'{function.__name__}: unsupported annotation for {name}: {annotation!r} '
-                                  '(use int, float or F64Array)')
+                                  '(use int, float, F64Array or I64Array)')
             self.types[name] = kind
         self.globals = function.__globals__
         ns = function.__builtins__
@@ -182,6 +207,17 @@ class Compiler:
         self.assigned = set(self.names)
         self.local_names = set(self.names) | {n.id for n in ast.walk(self.node)
                                              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        targets = []
+        for node in ast.walk(self.node):
+            if isinstance(node, ast.Assign):
+                targets += node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets.append(node.target)
+        self.written = {t.value.id for t in targets if isinstance(t, ast.Subscript)
+                        and isinstance(t.value, ast.Name) and self.types.get(t.value.id) in ARRAY_KINDS}
+        returns = self.signature.return_annotation
+        self.declared_return = {int:'i64','int':'i64',float:'f64','float':'f64',None:'none','None':'none'}.get(
+            returns if isinstance(returns, (str, type)) or returns is None else object())
         self.used_builtins = set()
         self.counter = 0
         self.loop_depth = 0
@@ -189,7 +225,8 @@ class Compiler:
         self.max_iterations = max_iterations
         # Shared by every function compiled into one library.
         self.program = _program if _program is not None else {
-            'functions': [], 'index': {}, 'stack': [], 'guards': {}, 'code_guards': {}, 'callees': []}
+            'functions': [], 'index': {}, 'stack': [], 'guards': {}, 'code_guards': {}, 'callees': [],
+            'recursive': {}}
 
     # ------------------------------------------------------------ diagnostics
     def fail(self, node, message):
@@ -253,6 +290,18 @@ class Compiler:
             self.fail(node, 'expected an int or float value')
         return value, kind
 
+    def array(self, node):
+        value, kind = self.expr(node)
+        if kind not in ARRAY_KINDS:
+            self.fail(node, 'expected an F64Array or I64Array parameter')
+        return value, kind
+
+    def element(self, sub):
+        """Read array[index] -> (rust, element kind)."""
+        a, kind = self.array(sub.value)
+        i = self.expect(sub.slice, 'i64')
+        return f'at(&*{a},{i})?', ELEMENT[kind]
+
     def as_float(self, node):
         value, kind = self.scalar(node)
         return (f'({value} as f64)' if kind == 'i64' else value)
@@ -297,7 +346,7 @@ class Compiler:
             cond = self.condition(n.test)
             a, ta = self.expr(n.body)
             b, tb = self.expr(n.orelse)
-            if ta != tb or ta == 'array':
+            if ta != tb or ta in ARRAY_KINDS:
                 self.fail(n, 'both branches of `x if c else y` must have the same scalar type')
             return f'(if {cond} {{ {a} }} else {{ {b} }})', ta
         if isinstance(n, ast.Call):
@@ -321,8 +370,8 @@ class Compiler:
     def binop(self, n, left, op, right):
         a, ta = self.expr(left)
         b, tb = self.expr(right)
-        if 'array' in (ta, tb):
-            self.fail(n, 'arrays must be indexed inside float(array[index])')
+        if ta in ARRAY_KINDS or tb in ARRAY_KINDS:
+            self.fail(n, 'read array elements with float(a[i]) or int(a[i])')
         if ta == tb == 'i64':
             checked = {ast.Add:'checked_add',ast.Sub:'checked_sub',ast.Mult:'checked_mul'}.get(type(op))
             if checked:
@@ -382,16 +431,18 @@ class Compiler:
     def builtin_call(self, n, name, args):
         self.builtin(name)
         if name == 'len' and len(args) == 1:
-            a = self.expect(args[0], 'array')
+            a, _ = self.array(args[0])
             return f'({a}.len() as i64)', 'i64'
         if name == 'float' and len(args) == 1:
             arg = args[0]
             if isinstance(arg, ast.Subscript):
-                a = self.expect(arg.value, 'array')
-                i = self.expect(arg.slice, 'i64')
-                return f'at({a},{i})?', 'f64'
+                value, kind = self.element(arg)
+                return (value if kind == 'f64' else f'({value} as f64)'), 'f64'
             return self.as_float(arg), 'f64'
         if name == 'int' and len(args) == 1:
+            if isinstance(args[0], ast.Subscript):
+                value, kind = self.element(args[0])
+                return (value, 'i64') if kind == 'i64' else (f'to_int({value})?', 'i64')
             value, kind = self.scalar(args[0])
             return (f'({value})', 'i64') if kind == 'i64' else (f'to_int({value})?', 'i64')
         if name == 'abs' and len(args) == 1:
@@ -415,12 +466,20 @@ class Compiler:
             return self.binop(n, args[0], ast.Pow(), args[1])
         self.fail(n, f'unsupported use of {name}()')
 
+    def register(self, rust_name):
+        """Make this function callable (by recursive calls) before its body is compiled."""
+        params = [self.types[p] for p in self.signature.parameters]
+        self.program['index'][id(self.function)] = (self.function, rust_name, params, self.declared_return)
+
     def user_call(self, n, name, callee, args):
         program = self.program
-        if callee in program['stack']:
-            self.fail(n, f'recursive call to {name!r} is unsupported')
         key = id(callee)
-        if key not in program['index']:
+        if callee in program['stack']:
+            entry = program['index'].get(key)
+            if entry is None or entry[3] in (None, 'none'):
+                self.fail(n, f'recursive call to {name!r}: annotate its return type (-> int or -> float)')
+            program['recursive'][key] = entry[3]
+        elif key not in program['index']:
             program['stack'].append(callee)
             try:
                 try:
@@ -429,10 +488,17 @@ class Compiler:
                     raise Unsupported(f'called function {name!r}: {exc}') from None
                 except (OSError, TypeError) as exc:
                     raise Unsupported(f'called function {name!r}: source unavailable ({exc})') from None
-                rust_name = f'k{len(program["index"])}'
+                if sub.written:
+                    self.fail(n, f'called function {name!r} writes to an array; '
+                                 'only the decorated function itself can write arrays')
+                rust_name = f'k{program.setdefault("next", 0)}'
+                program['next'] += 1
+                sub.register(rust_name)
                 text = sub.function_text(rust_name)
             finally:
                 program['stack'].pop()
+            if sub.return_type == 'none':
+                self.fail(n, f'called function {name!r} does not return a value')
             params = [sub.types[p] for p in sub.signature.parameters]
             program['index'][key] = (callee, rust_name, params, sub.return_type)
             program['functions'].append(text)
@@ -447,8 +513,9 @@ class Compiler:
             value, actual = self.expr(arg)
             if actual != kind:
                 self.fail(arg, f'argument to {name}() must be {kind}, got {actual}')
-            values.append(value)
-        return f'{rust_name}({", ".join(values + ["fuel"])})?', return_type
+            values.append(f'&*{value}' if kind in ARRAY_KINDS else value)
+        # Each call spends one unit of the iteration budget, so runaway recursion stops too.
+        return f'({{ tick(fuel)?; {rust_name}({", ".join(values + ["fuel", "depth+1"])})? }})', return_type
 
     # ------------------------------------------------------------- conditions
     def condition(self, n):
@@ -478,9 +545,17 @@ class Compiler:
                         a, ta = f'({float(ca)!r}f64)', 'f64'
                     elif tb == 'i64' and ta == 'f64' and cb is not None:
                         b, tb = f'({float(cb)!r}f64)', 'f64'
-                if ta != tb or ta == 'array':
-                    self.fail(n, 'comparison operands must have the same scalar type '
-                                 '(int vs float only works with small int literals)')
+                if {ta, tb} == {'i64', 'f64'}:
+                    # Variables of different types: compare exactly, as CPython does.
+                    c = f'cmp_if({a},{b})' if ta == 'i64' else f'cmp_if({b},{a})'
+                    flip = {ast.Lt:ast.Gt,ast.LtE:ast.GtE,ast.Gt:ast.Lt,ast.GtE:ast.LtE}
+                    kind = type(op) if ta == 'i64' else flip.get(type(op), type(op))
+                    test = {ast.Lt:'c==-1',ast.LtE:'c==-1 || c==0',ast.Gt:'c==1',ast.GtE:'c==1 || c==0',
+                            ast.Eq:'c==0',ast.NotEq:'c!=0'}[kind]
+                    parts.append(f'({{ let c={c}; {test} }})')
+                    continue
+                if ta != tb or ta in ARRAY_KINDS:
+                    self.fail(n, 'comparison operands must be int or float values')
                 parts.append(f'(({a}) {ops[type(op)]} ({b}))')
             return '(' + ' && '.join(parts) + ')'
         try:
@@ -507,8 +582,36 @@ class Compiler:
         return value, kind, literal
 
     # ------------------------------------------------------------- statements
+    def store(self, node, target, value_node, op=None):
+        """array[index] = value (or op=) -> Rust statement."""
+        if not (isinstance(target.value, ast.Name) and target.value.id in self.written):
+            self.fail(node, 'only F64Array / I64Array parameters can be written with a[i] = value')
+        a, kind = self.array(target.value)
+        element = ELEMENT[kind]
+        i = self.expect(target.slice, 'i64')
+        self.counter += 1
+        j = self.counter
+        if op is None:
+            value, vkind = self.scalar(value_node)
+        else:
+            if not isinstance(op, (ast.Add, ast.Sub, ast.Mult)) and not (element == 'f64' and isinstance(op, ast.Div)):
+                self.fail(node, 'array elements support +=, -=, *= (and /= for F64Array)')
+            current = ast.Name(id=f'__element{j}', ctx=ast.Load())
+            self.types[current.id] = element
+            self.names[current.id] = f'e{j}'
+            self.assigned.add(current.id)
+            value, vkind = self.binop(node, current, op, value_node)
+            self.assigned.discard(current.id)
+            del self.types[current.id]
+        if element == 'f64' and vkind == 'i64':
+            value, vkind = f'({value} as f64)', 'f64'
+        if vkind != element:
+            self.fail(node, 'I64Array elements can only be set to int values')
+        read = f'let e{j}: {element} = at(&*{a},i{j})?; ' if op is not None else ''
+        return f'{{ let i{j}: i64 = {i}; {read}let w{j}: {element} = {value}; put(&mut *{a},i{j},w{j})?; }}'
+
     def assign(self, node, name, value, kind):
-        if kind == 'array':
+        if kind in ARRAY_KINDS:
             self.fail(node, 'arrays cannot be assigned to other variables')
         if name in self.types and self.types[name] != kind:
             self.fail(node, f'{name!r} changes type from {self.types[name]} to {kind}; '
@@ -529,7 +632,11 @@ class Compiler:
                 continue
             if isinstance(n, ast.Pass):
                 continue
-            if isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name):
+            if isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Subscript):
+                lines.append(self.store(n, n.targets[0], n.value))
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target,ast.Subscript):
+                lines.append(self.store(n, n.target, n.value, n.op))
+            elif isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name):
                 value, kind = self.expr(n.value)
                 lines.append(self.assign(n, n.targets[0].id, value, kind))
             elif isinstance(n, ast.AnnAssign) and isinstance(n.target,ast.Name) and n.value is not None:
@@ -538,12 +645,19 @@ class Compiler:
             elif isinstance(n, ast.AugAssign) and isinstance(n.target,ast.Name):
                 value, kind = self.binop(n, ast.Name(id=n.target.id, ctx=ast.Load()), n.op, n.value)
                 lines.append(self.assign(n, n.target.id, value, kind))
-            elif isinstance(n, ast.Return) and n.value is not None:
+            elif isinstance(n, ast.Return) and n.value is not None and not (
+                    isinstance(n.value, ast.Constant) and n.value.value is None):
                 value, kind = self.expr(n.value)
-                if kind == 'array' or (self.return_type and kind != self.return_type):
+                if kind in ARRAY_KINDS or (self.return_type and kind != self.return_type):
                     self.fail(n, 'every return must have the same scalar type (int or float)')
                 self.return_type = kind
                 lines.append(f'return Ok({value});')
+                exits = True
+            elif isinstance(n, ast.Return):
+                if self.return_type not in (None, 'none'):
+                    self.fail(n, 'a function cannot both return a value and return None')
+                self.return_type = 'none'
+                lines.append('return Ok(());')
                 exits = True
             elif isinstance(n, ast.If):
                 cond = self.condition(n.test)
@@ -608,37 +722,63 @@ let current{j}=cursor{j}; cursor{j}+=step{j};
         params = list(self.signature.parameters)
         body = self.block(self.node.body)
         if self.return_type is None:
-            raise Unsupported(f'{self.function.__name__}: needs at least one `return <int or float>`')
-        # A path that falls off the end returns Err(5): the call is replayed in
-        # Python, which returns None exactly as the original function does.
+            self.return_type = 'none'  # no return statement: Python returns None
+        recursive = self.program['recursive'].get(id(self.function))
+        if recursive is not None and recursive != self.return_type:
+            raise Unsupported(f'{self.function.__name__}: recursive function returns {self.return_type} '
+                              f'but is annotated {recursive}')
+        rust_type = '()' if self.return_type == 'none' else self.return_type
+        # A value-returning path that falls off the end returns Err(5): the call is
+        # replayed in Python, which returns None exactly as the original function does.
+        end = 'Ok(())' if self.return_type == 'none' else 'Err(5)'
         declarations = '\n'.join(f'let mut {self.name(k)}: {t} = {"0.0" if t=="f64" else "0"};'
-                                 for k,t in self.types.items() if k not in params)
-        arguments = [f'{self.name(p)}: &[f64]' if self.types[p]=='array' else f'mut {self.name(p)}: {self.types[p]}'
-                     for p in params]
-        arguments.append('fuel: &mut u64')
-        return (f'fn {rust_name}({", ".join(arguments)})->Result<{self.return_type},i32>{{\n'
-                f'{declarations}\n{body}\nErr(5)\n}}')
+                                 for k,t in self.types.items() if k not in params and t in ('i64','f64'))
+        arguments = []
+        for p in params:
+            kind = self.types[p]
+            if kind in ARRAY_KINDS:
+                ref = '&mut ' if p in self.written else '&'
+                arguments.append(f'{self.name(p)}: {ref}[{ELEMENT[kind]}]')
+            else:
+                arguments.append(f'mut {self.name(p)}: {kind}')
+        arguments += ['fuel: &mut u64', 'depth: u32']
+        return (f'fn {rust_name}({", ".join(arguments)})->Result<{rust_type},i32>{{\n'
+                f'if depth>{MAX_DEPTH} {{return Err(6)}}\n'
+                f'{declarations}\n{body}\n{end}\n}}')
 
     def generate(self):
         params = list(self.signature.parameters)
         self.program['stack'].append(self.function)
+        self.register('compute')
         try:
             main = self.function_text('compute')
         finally:
             self.program['stack'].pop()
-        ffi=[]; calls=[]
+        ffi=[]; calls=[]; setup=[]; publish=[]
         for p in params:
             name=self.name(p); kind=self.types[p]
-            if kind=='array':
-                ffi.extend([f'{name}: *const f64', f'{name}_len: usize'])
-                calls.append(f'if {name}_len==0 {{ &[] }} else {{ std::slice::from_raw_parts({name},{name}_len) }}')
+            if kind in ARRAY_KINDS:
+                t = ELEMENT[kind]
+                if p in self.written:
+                    # Copy-on-write: the caller's array changes only if the call succeeds.
+                    ffi.extend([f'{name}: *mut {t}', f'{name}_len: usize'])
+                    setup.append(f'let mut copy_{name}: Vec<{t}> = if {name}_len==0 {{ Vec::new() }} '
+                                 f'else {{ std::slice::from_raw_parts({name},{name}_len).to_vec() }};')
+                    calls.append(f'&mut copy_{name}[..]')
+                    publish.append(f'if {name}_len>0 {{ std::slice::from_raw_parts_mut({name},{name}_len)'
+                                   f'.copy_from_slice(&copy_{name}); }}')
+                else:
+                    ffi.extend([f'{name}: *const {t}', f'{name}_len: usize'])
+                    calls.append(f'if {name}_len==0 {{ &[] }} else {{ std::slice::from_raw_parts({name},{name}_len) }}')
             else:
                 ffi.append(f'{name}: {kind}')
                 calls.append(name)
-        ffi.append(f'out: *mut {self.return_type}')
-        calls.append('&mut fuel')
+        out_type = 'i64' if self.return_type == 'none' else self.return_type
+        store = '' if self.return_type == 'none' else '*out=v;'
+        ffi.append(f'out: *mut {out_type}')
+        calls += ['&mut fuel', '0']
         callees = '\n'.join(self.program['functions'])
-        return f'''// Generated by PyRust Engine 0.5.
+        return f'''// Generated by PyRust Engine 0.6.
 #![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true)]
 {HELPERS}
 {callees}
@@ -646,7 +786,8 @@ let current{j}=cursor{j}; cursor{j}+=step{j};
 #[no_mangle]
 pub unsafe extern "C" fn pyrust_run({','.join(ffi)})->i32{{
 let mut fuel:u64={self.max_iterations};
-match compute({','.join(calls)}) {{Ok(v)=>{{*out=v;0}},Err(code)=>code}}
+{chr(10).join(setup)}
+match compute({','.join(calls)}) {{Ok(v)=>{{{' '.join(publish)} {store} 0}},Err(code)=>code}}
 }}
 '''
 

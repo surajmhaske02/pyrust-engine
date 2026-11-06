@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrust-engine"
-version = "0.5.0"
+version = "0.6.0"
 description = "Make Python code faster with one decorator: compiles numeric Python to Rust, with exact Python fallback"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,9 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 include = ["pyrust_engine*"]
+
+[tool.setuptools.package-data]
+pyrust_engine = ["py.typed"]
 
 [project.optional-dependencies]
 arrays = ["numpy>=1.24"]

@@ -45,8 +45,9 @@ class Explain(unittest.TestCase):
 
     def test_recursion_rejected_with_line(self):
         with self.assertRaises(Unsupported) as ctx:
-            Compiler(k.recursive).generate()
+            Compiler(k.recursive_unannotated).generate()
         self.assertIn('recursive call', str(ctx.exception))
+        self.assertIn('annotate its return type', str(ctx.exception))
         self.assertIn('line ', str(ctx.exception))
 
     def test_error_message_has_line_and_code(self):
@@ -79,7 +80,7 @@ class Explain(unittest.TestCase):
         self.assertIn('helper_square', text)
 
     def test_explain_unsupported(self):
-        text = optimize(k.recursive, warn_on_fallback=False).explain()
+        text = optimize(k.recursive_unannotated, warn_on_fallback=False).explain()
         self.assertIn('runs as plain Python', text)
         self.assertIn('recursive call', text)
 

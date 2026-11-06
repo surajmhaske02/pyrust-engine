@@ -12,6 +12,7 @@ import textwrap
 import threading
 import time
 import types
+from typing import Any, Callable, Optional, ParamSpec, Protocol, TypeVar, overload
 import warnings
 from .compiler import Compiler, Unsupported, KNOWN_BUILTINS
 from .cache import cache_root, process_lock, cached_path, compile_library
@@ -19,7 +20,8 @@ from .cache import cache_root, process_lock, cached_path, compile_library
 _STATUS = {1:'integer overflow',2:'zero divisor or zero range step',3:'array index out of bounds',
            4:'native iteration budget exceeded',5:'no scalar return',
            6:'value outside the native fast path (math domain, float overflow, negative exponent or huge int division)'}
-_TYPE_NAMES = {'i64':'int','f64':'float','array':'F64Array'}
+_TYPE_NAMES = {'i64':'int','f64':'float','array':'F64Array','iarray':'I64Array','none':'None'}
+_ARRAYS = {'array':('float64',ctypes.c_double,'F64Array'),'iarray':('int64',ctypes.c_int64,'I64Array')}
 
 class OptimizationError(RuntimeError):
     pass
@@ -115,6 +117,29 @@ def _plain_python(fn,max_iterations):
     clone.explain=lambda:_explain_text(fn,max_iterations,loop_free=True)
     return clone
 
+P = ParamSpec('P')
+R = TypeVar('R', covariant=True)
+
+
+class OptimizedFunction(Protocol[P, R]):
+    """What @optimize returns: callable like the original, plus PyRust helpers."""
+    python: Callable[P, R]
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
+    def report(self) -> dict[str, Any]: ...
+    def prepare(self, *, background: bool = False) -> dict[str, Any]: ...
+    def reset(self) -> dict[str, Any]: ...
+    def explain(self) -> str: ...
+    def rust_source(self) -> str: ...
+
+
+@overload
+def optimize(function: Callable[P, R], *, backend: str = ..., fallback: bool = ...,
+             cache_dir: Optional[str] = ..., max_iterations: int = ..., native_loop_free: bool = ...,
+             warn_on_fallback: bool = ...) -> OptimizedFunction[P, R]: ...
+@overload
+def optimize(function: None = None, *, backend: str = ..., fallback: bool = ...,
+             cache_dir: Optional[str] = ..., max_iterations: int = ..., native_loop_free: bool = ...,
+             warn_on_fallback: bool = ...) -> Callable[[Callable[P, R]], OptimizedFunction[P, R]]: ...
 def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, max_iterations=10_000_000,
              native_loop_free=False, warn_on_fallback=True):
     """Compile a numeric Python function to Rust, falling back to Python when needed.
@@ -189,7 +214,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
             argtypes=[]
             for p in signature.parameters:
                 kind=description.types[p]
-                argtypes.extend([ctypes.POINTER(ctypes.c_double),ctypes.c_size_t] if kind=='array' else
+                argtypes.extend([ctypes.POINTER(_ARRAYS[kind][1]),ctypes.c_size_t] if kind in _ARRAYS else
                                 [ctypes.c_double if kind=='f64' else ctypes.c_int64])
             output=ctypes.c_double if description.return_type=='f64' else ctypes.c_int64
             entry.argtypes=argtypes+[ctypes.POINTER(output)]
@@ -234,7 +259,9 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     loaded=candidate
                     snapshot=(candidate[0],candidate[1],candidate[2],
                               tuple(description.types[p] for p in param_names),
-                              description.guards,description.code_guards)
+                              description.guards,description.code_guards,
+                              tuple(p in description.written for p in param_names),
+                              description.return_type=='none')
                     update(backend='rust',reason=None,compile_error=None,cache_hit=hit,cache_rebuilt=rebuilt)
                 except Exception as exc:  # any compiler/loader failure means Python fallback
                     loaded=None;snapshot=None
@@ -270,9 +297,10 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
         def changed():
             return any(a is not b for a,b in zip(original,(fn.__code__,fn.__defaults__,fn.__kwdefaults__)))
 
-        def convert(values,kinds):
+        def convert(values,kinds,written):
             args=[]
-            for name,kind,value in zip(param_names,kinds,values):
+            ranges=[] if any(written) else None
+            for name,kind,value,writes in zip(param_names,kinds,values,written):
                 if kind=='i64':
                     if type(value) is not int or not -(2**63)<=value<2**63:
                         raise Unsupported(f'{name}: expected exact signed 64-bit int')
@@ -282,15 +310,28 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                         raise Unsupported(f'{name}: expected exact Python float')
                     args.append(value)
                 else:
+                    dtype,ctype,label=_ARRAYS[kind]
                     try:
                         import numpy as np
                     except ImportError:
-                        raise Unsupported('NumPy is required for F64Array') from None
-                    if (type(value) is not np.ndarray or value.dtype!=np.dtype('float64') or
+                        raise Unsupported(f'NumPy is required for {label}') from None
+                    if (type(value) is not np.ndarray or value.dtype!=np.dtype(dtype) or
                         not value.dtype.isnative or value.ndim!=1 or not value.flags.c_contiguous or
                         not value.flags.aligned or value.size>2**63-1):
-                        raise Unsupported(f'{name}: expected aligned contiguous native float64 1-D ndarray')
-                    args.extend([value.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),value.size])
+                        raise Unsupported(f'{name}: expected aligned contiguous native {dtype} 1-D ndarray')
+                    if writes and not value.flags.writeable:
+                        raise Unsupported(f'{name}: array is read-only')
+                    if ranges is not None and value.size:
+                        start=value.ctypes.data
+                        ranges.append((start,start+value.nbytes,writes))
+                    args.extend([value.ctypes.data_as(ctypes.POINTER(ctypes.c_double if kind=='array' else ctypes.c_int64)),value.size])
+            if ranges and len(ranges)>1:
+                # A written array that shares memory with another argument would make the
+                # private copy diverge from what Python sees, so run those calls in Python.
+                for i,(a0,a1,wa) in enumerate(ranges):
+                    for b0,b1,wb in ranges[i+1:]:
+                        if (wa or wb) and a0<b1 and b0<a1:
+                            raise Unsupported('array arguments share memory with an array that is written')
             return args
 
         perf_counter=time.perf_counter
@@ -318,7 +359,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     if active is None:
                         return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs)
                 # Holding `active` keeps the library loaded for the duration of the call.
-                lib,entry,output,kinds,guards,code_guards=active
+                lib,entry,output,kinds,guards,code_guards,written,returns_none=active
                 for namespace,builtin_ns,name,expected in guards:
                     if namespace.get(name,builtin_ns.get(name)) is not expected:
                         return python_call(f'{name} has been rebound',args,kwargs)
@@ -326,7 +367,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     if callee.__code__ is not code:
                         return python_call(f'code of called function {callee.__qualname__} changed',args,kwargs)
                 try:
-                    native_args=convert(values,kinds)
+                    native_args=convert(values,kinds,written)
                 except Unsupported as exc:
                     return python_call(str(exc),args,kwargs)
                 out=output()
@@ -339,7 +380,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                         state['native_seconds']+=elapsed
                     return python_call(_STATUS.get(status,'unknown native guard failure'),args,kwargs)
                 native_elapsed=elapsed
-                return out.value
+                return None if returns_none else out.value
             finally:
                 end=perf_counter()
                 # One lock acquisition per call for all counters.

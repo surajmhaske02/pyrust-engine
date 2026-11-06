@@ -28,3 +28,23 @@ jobs:
         with:
           name: results-${{ matrix.os }}-${{ matrix.python }}
           path: benchmarks/ci-results.json
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp && /tmp/clean/bin/python -c "import pyrust_engine, pathlib; print(pyrust_engine.__version__); assert (pathlib.Path(pyrust_engine.__file__).parent / 'py.typed').exists()"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

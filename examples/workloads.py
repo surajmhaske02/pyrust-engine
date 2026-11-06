@@ -57,3 +57,19 @@ def bits_work(n: int) -> int:
         h = ((h ^ (i & 255)) * 16777619) & mask
         h = h ^ (h >> 13) ^ ((h << 5) & mask)
     return h
+
+
+def fib(n: int) -> int:
+    # Recursion (0.6.0): needs the return annotation.
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+
+def smooth(values: F64Array, out: F64Array):
+    # Writes into an output array (0.6.0); returns None.
+    n = len(values)
+    for i in range(n):
+        left = float(values[i - 1]) if i > 0 else float(values[i])
+        right = float(values[i + 1]) if i < n - 1 else float(values[i])
+        out[i] = (left + 2.0 * float(values[i]) + right) / 4.0

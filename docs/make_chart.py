@@ -7,7 +7,8 @@ LABELS = {'integer_loop': 'Integer loop', 'float_recurrence': 'Float recurrence'
           'json_array_pipeline': 'JSON → array pipeline',
           'tiny_scalar_forced_native': 'Tiny add, forced native',
           'math_loop': 'math.sqrt/sin/log loop', 'function_calls': 'Helper calls in loop',
-          'bit_hash': 'Bit-mixing hash'}
+          'bit_hash': 'Bit-mixing hash',
+          'recursion_fib': 'Recursive fib(25)', 'array_write': 'Write output array (100k)'}
 SERIES = [('pyrust', 'PyRust', 's1', 'circle')]
 rows = []
 for r in d['results']:

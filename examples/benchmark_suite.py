@@ -13,7 +13,7 @@ import tempfile
 import time
 import numpy as np
 from pyrust_engine import optimize
-from .workloads import integer_work,float_work,array_energy,scalar_add,math_work,calls_work,bits_work
+from .workloads import integer_work,float_work,array_energy,scalar_add,math_work,calls_work,bits_work,fib,smooth
 
 def measure(fn,args,repeat=7,batch=1):
     samples=[]
@@ -25,7 +25,9 @@ def measure(fn,args,repeat=7,batch=1):
     return {'median_seconds':statistics.median(samples),'min_seconds':min(samples),'samples_seconds':samples}
 
 def same(a,b):
-    if type(a) is int:
+    if a is None:
+        assert b is None,b
+    elif type(a) is int:
         assert a==b,(a,b)
     else:
         assert math.isclose(a,b,rel_tol=1e-12,abs_tol=1e-12),(a,b)
@@ -43,6 +45,8 @@ def run():
           ('math_loop',math_work,(300_000,),1,{}),
           ('function_calls',calls_work,(300_000,),1,{}),
           ('bit_hash',bits_work,(300_000,),1,{}),
+          ('recursion_fib',fib,(25,),1,{}),
+          ('array_write',smooth,(array,np.empty_like(array)),1,{}),
           # Default: loop-free functions run as plain Python (no dispatch overhead).
           ('tiny_scalar',scalar_add,(12,19),1000,{}),
           # Forced native: shows the raw ctypes dispatch cost per call.

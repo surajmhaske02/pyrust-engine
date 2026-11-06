@@ -157,3 +157,10 @@ def to_int(x: float) -> int:
 def wraps_helper(n: int) -> int:
     # No loop of its own, but it calls a looping function: worth compiling together.
     return helper_sum(n) + 1
+
+
+def recursive_unannotated(n: int):
+    total = 0
+    for i in range(1):
+        total = n if n < 2 else recursive_unannotated(n - 1) + recursive_unannotated(n - 2)
+    return total
