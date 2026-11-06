@@ -1,3 +1,30 @@
+# 0.5.0
+
+Much more Python compiles natively, plus tools that tell you why code doesn't.
+
+- **Operators:** integer `**` (non-negative exponents), `& | ^ ~ << >>`, `int / int`
+  (exact when both fit in 2**53, otherwise replayed); float `//`, `%` and `**` using
+  CPython's exact `float_divmod`, `float_rem` and `float_pow` rules.
+- **Builtins:** `abs`, `min` / `max` with any number of arguments, `int(x)`, `pow(a, b)`.
+- **`math`:** `sqrt exp log log2 log10 sin cos tan asin acos atan sinh cosh tanh fabs`,
+  `floor ceil trunc`, `isnan isinf isfinite`, `pi e tau inf nan`, as `math.f` or
+  `from math import f`. Domain errors and overflow replay in Python, so the same
+  exception is raised (new native status 6).
+- **Calls between functions:** plain or `@optimize` functions called from a compiled
+  function are compiled into the same library (recursion stays in Python). Callee names
+  and code objects are checked on every call; a change falls back to Python.
+- **Syntax:** `x if c else y`, `while True`, module-level int/float constants (guarded
+  against reassignment).
+- **Developer tools:** error messages include function name, line number and the
+  offending code; `PyRustFallbackWarning` once per reason (`warn_on_fallback=False` to
+  silence); `fn.explain()`; `python -m pyrust_engine check file.py [--json]`.
+- Loop-free functions that call another function are compiled instead of being routed
+  to plain Python.
+- Tests: `test_v5.py` (edge cases for every new operation) and an extended fuzzer;
+  89 tests in total, passing on Linux, Windows and macOS.
+- Benchmarks: new math, helper-call and bit-hash workloads; README numbers now come from
+  a CI run on GitHub Actions `ubuntu-latest`.
+
 # 0.4.0
 
 Fixes the tiny-function slowdown and gets CI green on all three platforms.
