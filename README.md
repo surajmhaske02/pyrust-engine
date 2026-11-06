@@ -5,35 +5,42 @@
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Make slow Python loops fast by adding one line.**
+**Make your Python code faster by adding one line.**
 
-Put `@optimize` above a function. PyRust turns that function into Rust code, so its loops can run many times faster. You still write normal Python, and **your answers never change**: if PyRust can't run something safely, it runs your normal Python code instead.
+Put `@optimize` above a function. PyRust turns that function into Rust, compiles it and runs it as native machine code. You keep writing normal Python, and **your answers never change**: anything PyRust can't run safely runs as normal Python instead.
 
-- ✍️ **Write plain Python.** No new language and no build step.
-- ⚡ **Get speed on number-crunching code:** loops, math functions, bit tricks and helper functions run about **10× to 120× faster** in our tests.
-- 🛟 **Never get a wrong answer:** anything PyRust can't handle runs as normal Python.
+- ✍️ **Write plain Python.** No new language, no build step, no rewrite.
+- ⚡ **Get real speed on calculation-heavy code:** math functions, arithmetic, bit operations, helper functions, NumPy arrays and repeated work run about **10× to 120× faster** in our tests.
+- 🛟 **Never get a wrong answer.** Big integers, math errors and anything unsupported fall back to normal Python with the exact same result.
+- 🔍 **See what's happening.** `fn.explain()` and a one-time warning tell you which line can't be sped up, and why.
+
+Good fits: scientific and engineering formulas, finance and statistics, simulations, games and physics, signal processing, hashing and checksums, and number-heavy data processing.
 
 ```python
+import math
 from pyrust_engine import optimize
 
+def distance(x: float, y: float) -> float:
+    return math.sqrt(x * x + y * y)          # helpers are compiled together with their caller
+
 @optimize
-def weighted_sum(n: int) -> int:
-    total = 0
+def total_distance(n: int) -> float:
+    total = 0.0
     for i in range(n):
-        if i % 7 == 0:
-            total += i // 3
-        else:
-            total += i % 11
+        total += distance(float(i), float(n - i))
     return total
 
-weighted_sum(500_000)        # first call compiles (~0.1 s), then runs natively
-weighted_sum(500_000)        # ~36x faster than plain Python on our benchmark
-weighted_sum.report()        # native/fallback counts, timings, fallback reasons
-print(weighted_sum.explain()) # does it compile? if not, which line and why
-
 @optimize
-def add(a, b):              # no loop: runs as plain Python, zero overhead (0.4)
-    return a + b
+def checksum(n: int) -> int:
+    h = 2166136261
+    for i in range(n):
+        h = ((h ^ i) * 16777619) & (2 ** 32 - 1)   # integer math and bit operations
+    return h
+
+total_distance(300_000)          # first call compiles (~0.1 s), then runs as native code
+total_distance(300_000)          # ~68x faster than plain Python in our benchmark
+checksum(300_000)                # same answer as plain Python, at native speed
+print(total_distance.explain())  # does it compile? if not, which line and why
 ```
 
 > **Status: experimental prototype.** Not a general Python compiler and not production-hardened. Tests pass in CI on Linux, Windows and macOS (Python 3.10, 3.12, 3.13); published benchmarks are from Linux x86_64.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyrust-engine"
 version = "0.5.0"
-description = "Experimental typed Python kernel compiler with Rust acceleration and Python fallback"
+description = "Make Python code faster with one decorator: compiles numeric Python to Rust, with exact Python fallback"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
