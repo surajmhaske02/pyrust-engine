@@ -4,6 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/pyrust-engine)](https://pypi.org/project/pyrust-engine/)
 
 **Make your Python code faster by adding one line.**
 
@@ -246,7 +247,14 @@ Details and limitations: [`VALIDATION.md`](VALIDATION.md).
 
 ## Install
 
-Requires **Python 3.10+** and **Rust** (`rustc` on `PATH`, from <https://rustup.rs>). Not yet on PyPI.
+Requires **Python 3.10+** and **Rust** (`rustc` on `PATH`, from <https://rustup.rs>).
+
+```sh
+pip install pyrust-engine              # core, no dependencies
+pip install "pyrust-engine[arrays]"    # + NumPy, for F64Array / I64Array
+```
+
+From source, with the tests and benchmarks:
 
 ```sh
 git clone https://github.com/surajmhaske02/pyrust-engine.git
@@ -429,11 +437,10 @@ python docs/make_chart.py benchmarks/my-results.json docs/benchmark-speedup.svg
 
 ## What's missing for developers (v0.6)
 
-Done in 0.6: array writes, `int64` arrays, recursion, exact int/float comparisons, type hints (`py.typed`), the [API reference](docs/API.md), the [contributor guide](CONTRIBUTING.md) with issue templates, an updated [notebook](examples/pyrust_vs_python.ipynb), GitHub Releases, and benchmarks for macOS and Windows. These gaps remain:
+Done in 0.6: array writes, `int64` arrays, recursion, exact int/float comparisons, type hints (`py.typed`), the [API reference](docs/API.md), the [contributor guide](CONTRIBUTING.md) with issue templates, an updated [notebook](examples/pyrust_vs_python.ipynb), GitHub Releases, benchmarks for macOS and Windows, and the [PyPI release](https://pypi.org/project/pyrust-engine/). These gaps remain:
 
 | Missing | Why it matters to a developer |
 |---|---|
-| **Not on PyPI yet** | The package builds and passes `twine check` in CI, and a publish workflow is ready, but the PyPI project still has to be set up by its owner. Until then, install from GitHub. |
 | **Needs Rust installed on every machine** | PyRust compiles *your* functions, so `rustc` is needed wherever they should run natively. Without it, code still runs as plain Python. |
 | **Lists, tuples, dicts and strings** | Code that builds lists or returns several values still runs as plain Python. |
 | **2-D arrays and other dtypes** | Only 1-D `float64` / `int64` arrays are compiled. |
@@ -448,8 +455,7 @@ What needs improving, most impactful first:
 3. **2-D arrays** and `float32` / `int32` / `bool` element types.
 4. **Parallel loops** (`prange`) that use every CPU core, since native code already releases the GIL.
 5. **Adaptive dispatch.** Measure native vs Python time for the first calls and route small inputs (e.g. `n = 3`) to Python automatically.
-6. **PyPI release** (waiting on the one-time PyPI setup; see `.github/workflows/publish.yml`).
-7. **Benchmarks on ARM Linux**, and against Cython, PyPy and Codon.
+6. **Benchmarks on ARM Linux**, and against Cython, PyPy and Codon.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
