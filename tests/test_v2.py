@@ -256,7 +256,7 @@ class Arrays(unittest.TestCase):
         import numpy as np
         fn=optimize(k.sum_squares)
         base=np.arange(20,dtype=np.float64)
-        for a in (base[::2],base[::-1],base.astype(np.float32),base.astype('>f8')):
+        for a in (base[::2],base[::-1],base.astype(np.float16),base.astype(">f8")):
             self.assertEqual(fn(a),k.sum_squares(a))
             self.assertIn('float64',fn.report()['reason'])
         base.setflags(write=False)

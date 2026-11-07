@@ -495,21 +495,24 @@ class TextMixin:
         ref = self.cref(name)
         t = self.temp('q')
         if kind == 'slist':
-            needle, _ = self.text(n.args[0])
-            test = f'&e[..]=={needle}'
-            items = f'{ref}.iter()'
+            needle = self.item(n.args[0], 'strv')
+            setup = f'let {t} = {needle};'
+            items, same = f'{ref}.iter()', f'e[..]=={t}[..]'
         else:
             needle, nk = self.expr(n.args[0])
             el = ELEMENT[kind]
             if nk != el:
                 self.fail(n, f'list.{attr}() needs a value of the same type as the list')
+            setup = f'let {t}: {el} = {needle};'
             if el == 'f64':
-                needle = f'({{ let {t}v = {needle}; if {t}v.is_nan() {{ return Err(6) }} {t}v }})'
-            test = f'*e=={needle}'
-            items = f'av({ref}).iter()'
+                setup += f' if {t}.is_nan() {{ return Err(6) }}'  # Python compares NaN by identity first
+            items, same = f'av({ref}).iter()', f'*e=={t}'
         if attr == 'count':
-            return f'({items}.filter(|e| {test}).count() as i64)', 'i64'
-        return f'({items}.position(|e| {test}).map(|p| p as i64).ok_or(6)?)', 'i64'
+            return (
+                f'({{ {setup} {items}.filter(|e| {same.replace("*e", "**e") if kind != "slist" else same}).count() as i64 }})',
+                'i64',
+            )
+        return f'({{ {setup} {items}.position(|e| {same}).map(|p| p as i64).ok_or(6)? }})', 'i64'
 
     def dict_method(self, n, base, kind, attr):
         name, _ = self.container_name(base)
