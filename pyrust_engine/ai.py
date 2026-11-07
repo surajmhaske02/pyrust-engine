@@ -33,8 +33,6 @@ __all__ = [
     'top_k',
 ]
 
-_FAST = {'warn_on_fallback': False}
-
 
 def _numpy():
     try:
@@ -59,7 +57,7 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-tokenize = optimize(_tokenize, **_FAST)
+tokenize = optimize(_tokenize, warn_on_fallback=False)
 tokenize.__doc__ = """Lower-case word tokens: runs of letters and digits ("Don't stop!" -> ['don', 't', 'stop'])."""
 
 
@@ -82,7 +80,7 @@ def _chunk_text(text: str, size: int, overlap: int) -> list[str]:
     return chunks
 
 
-_chunk_compiled = optimize(_chunk_text, **_FAST)
+_chunk_compiled = optimize(_chunk_text, warn_on_fallback=False)
 
 
 def chunk_text(text: str, size: int = 1000, overlap: int = 200) -> list[str]:
@@ -103,7 +101,7 @@ def _ngrams(tokens: list[str], n: int) -> list[str]:
     return out
 
 
-_ngrams_compiled = optimize(_ngrams, **_FAST)
+_ngrams_compiled = optimize(_ngrams, warn_on_fallback=False)
 
 
 def ngrams(tokens: list[str], n: int = 2) -> list[str]:
@@ -130,7 +128,7 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[m]
 
 
-levenshtein = optimize(_levenshtein, **_FAST)
+levenshtein = optimize(_levenshtein, warn_on_fallback=False)
 levenshtein.__doc__ = """Edit distance: the number of single-character inserts, deletes and substitutions."""
 
 
@@ -149,7 +147,7 @@ def _jaccard(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / union
 
 
-jaccard = optimize(_jaccard, **_FAST)
+jaccard = optimize(_jaccard, warn_on_fallback=False)
 jaccard.__doc__ = """Jaccard similarity of two token lists: shared distinct tokens / all distinct tokens."""
 
 
@@ -183,7 +181,7 @@ def _minhash(tokens: list[str], num_perm: int, seed: int) -> list[int]:
     return signature
 
 
-_minhash_compiled = optimize(_minhash, **_FAST)
+_minhash_compiled = optimize(_minhash, warn_on_fallback=False)
 
 
 def minhash(tokens: list[str], num_perm: int = 128, seed: int = 1) -> list[int]:
@@ -204,7 +202,7 @@ def _token_f1(prediction: str, truth: str) -> float:
     gold = _tokenize(truth)
     if not pred or not gold:
         return 1.0 if len(pred) == len(gold) else 0.0
-    counts = {}
+    counts: dict[str, int] = {}
     for t in gold:
         counts[t] = counts.get(t, 0) + 1
     same = 0
@@ -220,7 +218,7 @@ def _token_f1(prediction: str, truth: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-token_f1 = optimize(_token_f1, **_FAST)
+token_f1 = optimize(_token_f1, warn_on_fallback=False)
 token_f1.__doc__ = """SQuAD-style token F1 between a prediction and the reference answer."""
 
 
@@ -253,7 +251,7 @@ def _rouge_l(candidate: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-rouge_l = optimize(_rouge_l, **_FAST)
+rouge_l = optimize(_rouge_l, warn_on_fallback=False)
 rouge_l.__doc__ = """ROUGE-L F-measure: longest common subsequence of tokens."""
 
 
@@ -292,8 +290,8 @@ def _cosine_scores64(matrix: F64Array2, query: F64Array, query_norm: float, out:
         out[i] = _row_cosine64(matrix, i, query, query_norm)
 
 
-_scores32 = optimize(_cosine_scores32, **_FAST)
-_scores64 = optimize(_cosine_scores64, **_FAST)
+_scores32 = optimize(_cosine_scores32, warn_on_fallback=False)
+_scores64 = optimize(_cosine_scores64, warn_on_fallback=False)
 
 
 def top_k(scores, k: int):
@@ -334,13 +332,13 @@ def cosine_top_k(query, matrix, k: int = 10):
 
 
 def _term_counts(tokens: list[str]) -> dict[str, int]:
-    counts = {}
+    counts: dict[str, int] = {}
     for t in tokens:
         counts[t] = counts.get(t, 0) + 1
     return counts
 
 
-_term_counts_compiled = optimize(_term_counts, **_FAST)
+_term_counts_compiled = optimize(_term_counts, warn_on_fallback=False)
 
 
 def _bm25_kernel(
@@ -366,7 +364,7 @@ def _bm25_kernel(
             out[doc] += weight * tf * (k1 + 1.0) / (tf + norm)
 
 
-_bm25_compiled = optimize(_bm25_kernel, **_FAST)
+_bm25_compiled = optimize(_bm25_kernel, warn_on_fallback=False)
 
 
 class BM25:

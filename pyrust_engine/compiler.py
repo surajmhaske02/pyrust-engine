@@ -32,38 +32,41 @@ class Unsupported(ValueError):
 from .compiler_text import MUTATING_METHODS, TextMixin  # noqa: E402
 from .rust_text import TEXT_HELPERS  # noqa: E402
 
+if typing.TYPE_CHECKING:  # to type checkers these annotations are plain NumPy arrays
+    from typing import Any as F32Array  # noqa: F401
+    from typing import Any as F32Array2
+    from typing import Any as F64Array  # noqa: F401
+    from typing import Any as F64Array2
+    from typing import Any as I64Array
+    from typing import Any as I64Array2
+else:
 
-class F64Array:
-    """Annotation for a contiguous, aligned, native-endian 1-D NumPy float64 array.
+    class F64Array:
+        """Annotation for a contiguous, aligned, native-endian 1-D NumPy float64 array.
 
-    Read elements with a[i] or float(a[i]); write them with a[i] = value. If a native
-    call fails halfway, its writes are undone before the call is replayed in Python.
-    """
+        Read elements with a[i] or float(a[i]); write them with a[i] = value. If a native
+        call fails halfway, its writes are undone before the call is replayed in Python.
+        """
 
+    class I64Array:
+        """Annotation for a contiguous, aligned, native-endian 1-D NumPy int64 array."""
 
-class I64Array:
-    """Annotation for a contiguous, aligned, native-endian 1-D NumPy int64 array."""
+    class F64Array2:
+        """Annotation for a C-contiguous 2-D NumPy float64 array: read and write a[i, j]."""
 
+    class I64Array2:
+        """Annotation for a C-contiguous 2-D NumPy int64 array: read and write a[i, j]."""
 
-class F64Array2:
-    """Annotation for a C-contiguous 2-D NumPy float64 array: read and write a[i, j]."""
+    class F32Array:
+        """Annotation for a contiguous 1-D NumPy float32 array (embeddings). Needs NumPy 2.
 
+        Elements are np.float32: float32 op float32 stays float32, and Python number
+        literals adapt to float32, exactly as NumPy 2 does. Write float(a[i]) to compute
+        in float64 instead.
+        """
 
-class I64Array2:
-    """Annotation for a C-contiguous 2-D NumPy int64 array: read and write a[i, j]."""
-
-
-class F32Array:
-    """Annotation for a contiguous 1-D NumPy float32 array (embeddings). Needs NumPy 2.
-
-    Elements are np.float32: float32 op float32 stays float32, and Python number
-    literals adapt to float32, exactly as NumPy 2 does. Write float(a[i]) to compute
-    in float64 instead.
-    """
-
-
-class F32Array2:
-    """Annotation for a C-contiguous 2-D NumPy float32 array, such as a matrix of embeddings."""
+    class F32Array2:
+        """Annotation for a C-contiguous 2-D NumPy float32 array, such as a matrix of embeddings."""
 
 
 def prange(*args):
