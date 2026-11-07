@@ -9,6 +9,31 @@ error status for anything else, so the call replays in Python:
 
 TEXT_HELPERS = r"""
 use std::collections::{HashMap,HashSet};
+// A fast keyed hash for dict/set keys (short strings and ints). The key is random per
+// process, like Python's string hashing, so hash values cannot be predicted from outside.
+static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+fn seed()->u64{*SEED.get_or_init(|| {
+    use std::hash::{BuildHasher,Hasher};
+    let mut h=std::collections::hash_map::RandomState::new().build_hasher(); h.write_u64(0x5eed); h.finish() | 1
+})}
+#[derive(Clone)] pub struct FastState(u64);
+impl Default for FastState { fn default()->Self{FastState(seed())} }
+pub struct FastHasher(u64);
+impl std::hash::BuildHasher for FastState { type Hasher=FastHasher; fn build_hasher(&self)->FastHasher{FastHasher(self.0)} }
+#[inline] fn fold(a:u64,b:u64)->u64{let r=(a as u128)*(b as u128); (r as u64)^((r>>64) as u64)}
+impl std::hash::Hasher for FastHasher {
+    #[inline] fn write(&mut self,bytes:&[u8]){
+        let mut h=self.0; let mut chunks=bytes.chunks_exact(8);
+        for c in &mut chunks {h=fold(h^u64::from_le_bytes([c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7]]),0x9E3779B97F4A7C15);}
+        let rest=chunks.remainder(); let mut t=[0u8;8]; t[..rest.len()].copy_from_slice(rest);
+        self.0=fold(h^u64::from_le_bytes(t)^(bytes.len() as u64),0xD6E8FEB86659FD93);
+    }
+    #[inline] fn write_u64(&mut self,x:u64){self.0=fold(self.0^x,0x9E3779B97F4A7C15);}
+    #[inline] fn write_i64(&mut self,x:i64){self.write_u64(x as u64)}
+    #[inline] fn write_usize(&mut self,x:usize){self.write_u64(x as u64)}
+    #[inline] fn finish(&self)->u64{fold(self.0,0xA0761D6478BD642F)}
+}
+pub type HSet<K>=HashSet<K,FastState>;
 // Strings are Unicode code points, shared and copied on write (s += t is amortized O(1)).
 #[derive(Clone,PartialEq,Eq,PartialOrd,Ord,Default)]
 pub struct S(std::sync::Arc<Vec<u32>>);
@@ -148,9 +173,22 @@ fn s_parse_float(s:&[u32])->Result<f64,i32>{
     b.parse::<f64>().map_err(|_|6)
 }
 // dict: insertion order, updates in place, CPython-like change detection while iterating.
-pub struct OMap<K,V>{slots:Vec<Option<(K,V)>>,idx:HashMap<K,usize>,ver:u64}
+pub struct OMap<K,V>{slots:Vec<Option<(K,V)>>,idx:HashMap<K,usize,FastState>,ver:u64}
 impl<K:Clone+Eq+std::hash::Hash,V:Clone> OMap<K,V>{
-    fn new()->Self{OMap{slots:Vec::new(),idx:HashMap::new(),ver:0}}
+    fn new()->Self{OMap{slots:Vec::new(),idx:HashMap::default(),ver:0}}
+    // One hash lookup for d[k] = d.get(k, d0) + x and d[k] += x.
+    fn slot_or(&mut self,k:K,d:V)->usize{
+        match self.idx.entry(k) {
+            std::collections::hash_map::Entry::Occupied(e)=>*e.get(),
+            std::collections::hash_map::Entry::Vacant(e)=>{
+                let i=self.slots.len(); let key=e.key().clone(); e.insert(i);
+                self.slots.push(Some((key,d))); self.ver+=1; i
+            }
+        }
+    }
+    fn slot(&self,k:&K)->Result<usize,i32>{self.idx.get(k).copied().ok_or(3)}
+    fn val(&self,i:usize)->Result<V,i32>{self.slots[i].as_ref().map(|e| e.1.clone()).ok_or(8)}
+    fn put(&mut self,i:usize,v:V){if let Some(e)=self.slots[i].as_mut() {e.1=v}}
     fn len(&self)->i64{self.idx.len() as i64}
     fn has(&self,k:&K)->bool{self.idx.contains_key(k)}
     fn get(&self,k:&K)->Option<V>{self.idx.get(k).and_then(|&i| self.slots[i].as_ref().map(|e| e.1.clone()))}
@@ -177,11 +215,11 @@ impl<K:Clone+Eq+std::hash::Hash,V:Clone> OMap<K,V>{
     fn values(&self)->Vec<V>{self.slots.iter().flatten().map(|e| e.1.clone()).collect()}
 }
 impl<K:Clone+Eq+std::hash::Hash,V:Clone> Default for OMap<K,V>{fn default()->Self{OMap::new()}}
-fn set_remove<K:Eq+std::hash::Hash>(s:&mut HashSet<K>,k:&K)->Result<(),i32>{if s.remove(k) {Ok(())} else {Err(3)}}
-fn set_and<K:Clone+Eq+std::hash::Hash>(a:&HashSet<K>,b:&HashSet<K>)->HashSet<K>{a.intersection(b).cloned().collect()}
-fn set_or<K:Clone+Eq+std::hash::Hash>(a:&HashSet<K>,b:&HashSet<K>)->HashSet<K>{a.union(b).cloned().collect()}
-fn set_sub<K:Clone+Eq+std::hash::Hash>(a:&HashSet<K>,b:&HashSet<K>)->HashSet<K>{a.difference(b).cloned().collect()}
-fn set_xor<K:Clone+Eq+std::hash::Hash>(a:&HashSet<K>,b:&HashSet<K>)->HashSet<K>{a.symmetric_difference(b).cloned().collect()}
+fn set_remove<K:Eq+std::hash::Hash>(s:&mut HSet<K>,k:&K)->Result<(),i32>{if s.remove(k) {Ok(())} else {Err(3)}}
+fn set_and<K:Clone+Eq+std::hash::Hash>(a:&HSet<K>,b:&HSet<K>)->HSet<K>{a.intersection(b).cloned().collect()}
+fn set_or<K:Clone+Eq+std::hash::Hash>(a:&HSet<K>,b:&HSet<K>)->HSet<K>{a.union(b).cloned().collect()}
+fn set_sub<K:Clone+Eq+std::hash::Hash>(a:&HSet<K>,b:&HSet<K>)->HSet<K>{a.difference(b).cloned().collect()}
+fn set_xor<K:Clone+Eq+std::hash::Hash>(a:&HSet<K>,b:&HSet<K>)->HSet<K>{a.symmetric_difference(b).cloned().collect()}
 // sorted() / list.sort(): stable, reverse keeps equal items in order; NaN replays.
 fn sort_f(v:&mut [f64],rev:bool)->Result<(),i32>{
     if v.iter().any(|x| x.is_nan()) {return Err(6)}
@@ -240,12 +278,12 @@ impl Col for S{
 }
 fn pack_str(s:&S)->Wr{let mut w=Wr::new(); S::put(&mut w,std::slice::from_ref(s)); w}
 fn pack_list<T:Col>(v:&[T])->Wr{let mut w=Wr::new(); w.u(v.len() as u64); T::put(&mut w,v); w}
-fn pack_set<K:Col+Eq+std::hash::Hash>(s:&HashSet<K>)->Wr{let v:Vec<K>=s.iter().cloned().collect(); pack_list(&v)}
+fn pack_set<K:Col+Eq+std::hash::Hash>(s:&HSet<K>)->Wr{let v:Vec<K>=s.iter().cloned().collect(); pack_list(&v)}
 fn pack_dict<K:Col+Eq+std::hash::Hash,V:Col>(m:&OMap<K,V>)->Wr{
     let mut w=Wr::new(); w.u(m.len() as u64); K::put(&mut w,&m.keys()); V::put(&mut w,&m.values()); w
 }
 fn unpack_list<T:Col>(p:*const u8,n:usize)->Vec<T>{let mut r=Rd{p,n,pos:0}; let k=r.u() as usize; T::get(&mut r,k)}
-fn unpack_set<K:Col+Eq+std::hash::Hash>(p:*const u8,n:usize)->HashSet<K>{unpack_list::<K>(p,n).into_iter().collect()}
+fn unpack_set<K:Col+Eq+std::hash::Hash>(p:*const u8,n:usize)->HSet<K>{unpack_list::<K>(p,n).into_iter().collect()}
 fn unpack_dict<K:Col+Eq+std::hash::Hash,V:Col>(p:*const u8,n:usize)->OMap<K,V>{
     let mut r=Rd{p,n,pos:0}; let k=r.u() as usize; let keys=K::get(&mut r,k); let vals=V::get(&mut r,k);
     let mut m=OMap::new(); for (a,b) in keys.into_iter().zip(vals) {m.set(a,b)} m

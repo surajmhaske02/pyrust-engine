@@ -86,7 +86,7 @@ def rust_type(kind):
         k, v = dict_parts(kind)
         return f'OMap<{RUST_TYPE[k]},{RUST_TYPE[v]}>'
     if is_set(kind):
-        return f'HashSet<{RUST_TYPE[set_part(kind)]}>'
+        return f'HSet<{RUST_TYPE[set_part(kind)]}>'
     parts = tuple_parts(kind)
     if parts:
         return '(' + ','.join(RUST_TYPE[p] for p in parts) + ')'
@@ -103,5 +103,5 @@ def zero(kind):
     if is_dict(kind):
         return 'OMap::new()'
     if is_set(kind):
-        return 'HashSet::new()'
+        return 'HSet::default()'
     return ZERO[kind]

@@ -281,7 +281,7 @@ class TextMixin:
         self.check_key(n, kk)
         t = self.temp('s')
         adds = ' '.join(f'{t}.insert({self.item(e, kk)});' for e in n.elts)
-        return f'{{ let mut {t} = HashSet::new(); {adds} {t} }}', f'set({kk})'
+        return f'{{ let mut {t} = HSet::default(); {adds} {t} }}', f'set({kk})'
 
     def check_key(self, node, kind):
         if kind not in ('i64', 'strv'):
@@ -675,16 +675,16 @@ class TextMixin:
             self.fail(n, f'list() of {kind} is not compiled', 'Iterating a set has no reproducible order.')
         if name == 'set':
             if kind == 'slist':
-                return f'{ref}.iter().cloned().collect::<HashSet<S>>()', 'set(strv)'
+                return f'{ref}.iter().cloned().collect::<HSet<S>>()', 'set(strv)'
             if kind in TEXT:
-                return f's_chars({ref}).into_iter().collect::<HashSet<S>>()', 'set(strv)'
+                return f's_chars({ref}).into_iter().collect::<HSet<S>>()', 'set(strv)'
             if kind in ('ilist', 'iarray'):
-                return f'av({ref}).iter().cloned().collect::<HashSet<i64>>()', 'set(i64)'
+                return f'av({ref}).iter().cloned().collect::<HSet<i64>>()', 'set(i64)'
             if is_set(kind):
                 return f'{ref}.clone()', kind
             if is_dict(kind):
                 key = dict_parts(kind)[0]
-                return f'{ref}.keys().into_iter().collect::<HashSet<_>>()', f'set({key})'
+                return f'{ref}.keys().into_iter().collect::<HSet<_>>()', f'set({key})'
             self.fail(n, f'set() of {kind} is not compiled')
         if is_dict(kind):
             return (
@@ -861,6 +861,9 @@ class TextMixin:
         if is_dict(kind):
             k, v = dict_parts(kind)
             t = self.temp('w')
+            update = self.counter_update(name, target, value_node, op)
+            if update is not None:
+                return update
             key = self.item(target.slice, k)
             if op is None:
                 value = self.item(value_node, v)
@@ -890,6 +893,47 @@ class TextMixin:
             value = self.item(value_node, 'strv')
             return f'{{ let {t}i = {index}; let {t}v = {value}; v_put({self.cmut(name, node)},{t}i,{t}v)?; }}'
         return None
+
+    def counter_update(self, name, target, value_node, op):
+        """d[k] = d.get(k, d0) <op> x  and  d[k] <op>= x, with a single hash lookup."""
+        kind = self.types[name]
+        k, v = dict_parts(kind)
+        if op is not None:
+            default, right, binop = None, value_node, op
+        else:
+            call = value_node.left if isinstance(value_node, ast.BinOp) else None
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == 'get'
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == name
+                and len(call.args) == 2
+                and not call.keywords
+                and ast.dump(call.args[0]) == ast.dump(target.slice)
+                and isinstance(target.slice, (ast.Name, ast.Constant))
+            ):
+                return None
+            default, right, binop = call.args[1], value_node.right, value_node.op
+        t = self.temp('u')
+        key = self.item(target.slice, k)
+        current = f'__dictitem{t}'
+        self.types[current] = v
+        self.names[current] = f'{t}e'
+        self.assigned.add(current)
+        try:
+            value, vk = self.binop(target, ast.Name(id=current, ctx=ast.Load()), binop, right)
+        finally:
+            self.assigned.discard(current)
+            del self.types[current]
+        if vk != v:
+            return None
+        ref = self.cmut(name, target)
+        if default is None:
+            find = f'{ref}.slot(&{t}k)?'  # d[k] += x on a missing key raises KeyError
+        else:
+            find = f'{ref}.slot_or({t}k,{self.item(default, v)})'
+        return f'{{ let {t}k = {key}; let {t}i = {find}; let {t}e = {ref}.val({t}i)?; let {t}v = {value}; {ref}.put({t}i,{t}v); }}'
 
     # ------------------------------------------------------------------ loops
     def ext_for(self, n, j):

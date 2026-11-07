@@ -26,6 +26,7 @@ nav:
   - Getting started: getting-started.md
   - Guide: guide.md
   - Examples: examples.md
+  - AI and agents: ai.md
   - Benchmarks: benchmarks.md
   - Deployment: deployment.md
   - Troubleshooting: troubleshooting.md

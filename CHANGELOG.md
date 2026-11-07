@@ -1,3 +1,42 @@
+# 0.7.2
+
+For AI engineers and agents: float32 embeddings, real string processing, lists, dicts and
+sets, a ready-made AI library, and tools that coding agents can drive.
+
+**Language**
+- **float32 arrays** (`F32Array`, `F32Array2`, NumPy 2) with NumPy's exact promotion rules:
+  float32 op float32 stays float32 and Python numbers adapt to float32. Values from
+  float64 arrays are tracked so mixed cases run as Python instead of guessing.
+- **Strings as values:** slicing, `split`, `strip`, `find`, `rfind`, `index`, `count`,
+  `startswith`, `endswith`, `replace`, `join`, `lower`, `upper`, `isdigit`/`isalpha`/...
+  on whole strings, `+`, `*`, `+=` (in place), f-strings with ints and strings,
+  `str(int)`, `int(s)`, `float(s)`. CPython's whitespace table and index rules.
+- **Lists:** `[]`, `append`, `pop`, `extend`, `sort`, `reverse`, `index`, `count`,
+  `del lst[i]`, literals, comprehensions, slicing, `sorted()`, `list()`, `min`/`max`
+  of a list, `+`, `zip()`, `reversed(range())`, lists of strings.
+- **dict and set:** insertion-ordered dicts with `get`/`pop`/`setdefault`/`del`/`in`,
+  loops over `items()`/`keys()`/`values()` (size changes during a loop replay and raise
+  like Python), `max(d, key=d.get)`; sets with `add`/`discard`/`remove`/`update`,
+  `& | - ^`; module-level `frozenset`/tuple constants.
+- Lists of strings, dicts and sets as arguments (read-only) and as return values.
+- Helper functions may be called as statements to fill a list or dict you pass them.
+- Array annotations (`F64Array`, ...) are `Any` for type checkers.
+
+**New: `pyrust_engine.ai`**
+- `cosine_top_k`, `top_k`, `BM25`, `tokenize`, `chunk_text`, `ngrams`, `levenshtein`,
+  `similarity`, `jaccard`, `minhash`, `minhash_similarity`, `token_f1`, `exact_match`,
+  `rouge_l`. Each is plain Python compiled by PyRust, identical to its source.
+
+**Tools for coding agents**
+- `python -m pyrust_engine suggest file.py [--json]` and `apply file.py [--write]`.
+- MCP server: `python -m pyrust_engine mcp` (also `pyrust-mcp`) with `check_code`,
+  `suggest_file`, `apply_file`, `rust_source`, `benchmark`, `doctor`.
+- `AGENTS.md` and `llms.txt`.
+
+**Examples and docs**
+- Hybrid RAG retriever, FastAPI service, evaluation script, Docker image that runs
+  without Rust; new "AI and agents" docs page.
+
 # 0.7.1
 
 Everyday Python, not only numbers: lists, strings, pandas columns, random numbers, and

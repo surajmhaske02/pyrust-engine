@@ -27,7 +27,8 @@ print(total_distance.explain())          # compiles? if not, which line, why, an
 | ⚡ Speed | 6x to 110x on calculation-heavy code: loops, math, bit operations, helper functions, recursion, NumPy arrays |
 | 🛟 Exact results | big integers, math errors and unsupported code replay in Python with the same result or exception |
 | 🧵 Parallel loops | `prange()` uses every CPU core for independent iterations |
-| 🧰 Everyday values | lists, `str`, `bytes`, pandas columns and the `random` module, with Python's exact results |
+| 🧰 Everyday values | lists, strings, dicts, sets, float32 embeddings, pandas columns and `random`, with Python's exact results |
+| 🤖 AI and agents | ready-made `pyrust_engine.ai` (BM25, cosine top-k, metrics), `suggest`/`apply`, an MCP server |
 | 🐼 Whole columns | `@vectorize` runs a one-value function over arrays or pandas columns in one native loop |
 | 🔍 Clear diagnostics | `explain()`, one-time warnings with line numbers and hints, `python -m pyrust_engine doctor` |
 | 📦 Easy deployment | `pip install pyrust-engine`; prebuild libraries so servers don't need Rust |

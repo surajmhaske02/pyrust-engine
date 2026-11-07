@@ -1275,8 +1275,8 @@ class Compiler(TextMixin):
             if key not in statics:
                 static = f'G{len(statics)}'
                 if type(value) is frozenset:
-                    body = f'[{",".join(rust_items)}].into_iter().collect::<HashSet<{element}>>()'
-                    statics[key] = (static, f'HashSet<{element}>', body)
+                    body = f'[{",".join(rust_items)}].into_iter().collect::<HSet<{element}>>()'
+                    statics[key] = (static, f'HSet<{element}>', body)
                 else:
                     body = f'vec![{",".join(rust_items)}]'
                     statics[key] = (static, f'Vec<{element}>', body)
@@ -2199,6 +2199,8 @@ class Compiler(TextMixin):
             value, kind = self.expr(n.value)
             t = self.temp('a')
             # s += t grows the string in place when nothing else shares it (like CPython).
+            if kind == 'char':
+                return f'{{ let {t}: u32 = {value}; s_push(&mut {self.name(name)},std::slice::from_ref(&{t})); }}'
             return f'{{ let {t} = {self.to_s(value, kind, n.value)}; s_push(&mut {self.name(name)},&{t}[..]); }}'
         if self.parallel is not None and name in self.parallel['outer']:
             # Integer += reductions are exact in any order; floats are not.

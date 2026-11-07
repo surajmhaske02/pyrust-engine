@@ -9,9 +9,10 @@ PyRust compiles a numeric subset of Python. Anything outside it still runs, as p
 | `int` | 64-bit, overflow-checked. Results that don't fit replay in Python's big integers. |
 | `float` | IEEE double, no fast-math: same results as CPython, including `-0.0`, NaN and infinities. |
 | `bool` | `True`/`False`, comparisons, `and`/`or`/`not`; bools in arithmetic act as 0/1 like Python. |
-| NumPy arrays | 1-D and 2-D `float64` / `int64`. |
-| lists | `list[float]` or `list[int]` arguments: read, loop over, write (`lst[i] = x`). New lists with `[0.0] * n` can be filled and returned. |
-| `str`, `bytes` | read-only: `len(s)`, `s[i]`, `for ch in s`, comparisons, `ch in "aeiou"`, `ord`, `chr`, `ch.isdigit()` and friends. |
+| NumPy arrays | 1-D and 2-D `float64`, `int64` and `float32` (float32 needs NumPy 2). |
+| lists | of floats, ints or strings: `[]`, `append`, `pop`, `extend`, `sort`, slicing, comprehensions, `sorted()`, `zip()`. |
+| `str`, `bytes` | strings are values: slicing, `split`, `strip`, `find`, `replace`, `join`, `lower`, `+`, f-strings, `int(s)`, `float(s)`. `bytes` are read-only. |
+| dicts and sets | `dict[str or int, int/float/bool/str]` and `set[str or int]`: get/set/`in`/`del`, loops over `.items()`, set `& | - ^`. |
 | pandas Series | `float64` / `int64` columns with the default `0..n-1` index, read-only: `s[i]`, `s.iloc[i]`, `len(s)`, `for x in s`. |
 | tuples | for unpacking (`a, b = b, a + b`) and returning several values. |
 
@@ -21,7 +22,8 @@ Annotations are optional. A function is compiled once for each combination of ar
 
 - Arithmetic: `+ - * / // % **`, `& | ^ ~ << >>`, comparisons including chained `a < b < c`.
 - Control flow: `if`/`elif`/`else`, `for` over `range(...)`, over an array (`for x in a`), `enumerate(a)`, `prange(...)`, `while`, `break`, `continue`, early `return`, `x if c else y`.
-- Builtins: `abs`, `min`, `max`, `sum(array)`, `round(x)`, `divmod`, `pow`, `int`, `float`, `bool`, `len`, `ord`, `chr`.
+- Builtins: `abs`, `min`, `max` (also of a list, and `max(d, key=d.get)`), `sum`, `round(x)`, `divmod`, `pow`, `int`, `float`, `bool`, `len`, `ord`, `chr`, `str`, `list`, `set`, `dict`, `sorted`, `zip`, `reversed(range(...))`.
+- Module-level `frozenset`s and tuples of strings, and `str` constants (for example a stop-word set).
 - `random`: `random()`, `uniform(a, b)`, `randint(a, b)`, `randrange(stop)`, `randrange(start, stop)`, `gauss(mu, sigma)`, `choice(seq)`.
 - `math`: `sqrt exp log log2 log10 sin cos tan asin acos atan atan2 sinh cosh tanh fabs copysign fmod floor ceil trunc isnan isinf isfinite pi e tau inf nan`.
 - Module-level `int`/`float`/`bool` constants.
@@ -47,6 +49,22 @@ def outer(a, b):
 
 Writes go straight into your array, with an undo log: if the call fails halfway, the writes are undone and the call replays in Python, so you see exactly what plain Python would do.
 
+## float32
+
+```python
+import numpy as np
+from pyrust_engine import optimize
+
+@optimize
+def dot(a, b):                         # float32 arrays, e.g. embeddings
+    total = np.float32(0.0)
+    for i in range(len(a)):
+        total += a[i] * b[i]           # float32 * float32 stays float32, like NumPy
+    return total                       # an np.float32, as in Python
+```
+
+PyRust follows NumPy 2's rules exactly. float32 op float32 is float32. A Python number (a literal, an `int`/`float` argument, `len(...)`, a `math` result) is converted to float32 first. Mixing float32 with `np.float64` values from a float64 array isn't compiled, because NumPy decides that result type from where the value came from. Write `float(x)` to compute in float64, or `np.float32(x)` to stay in float32. Division by zero replays in Python, where NumPy returns `inf` with a warning.
+
 ## Lists
 
 ```python
@@ -60,9 +78,17 @@ def running_max(values: list[int]) -> list[int]:
     return out                      # a normal Python list
 ```
 
-A list is copied into native memory for the call (a list of floats or a list of ints, not mixed). If the function writes into a list you passed, the new values are copied back into **the same list object** after the call succeeds. Each element keeps its type, so a list of floats only accepts float values (`lst[i] = float(x)`). `sum()` of a list of floats isn't compiled: Python 3.12+ adds Python floats with an extra-precise algorithm, so write the loop yourself.
+Lists hold one type: floats, ints or strings. Local lists can be built with `[]` and `append`, `[0.0] * n`, literals like `[1, 2, 3]`, comprehensions (`[x * x for x in values if x > 0]`), slicing and `sorted()`, and changed with `append`, `pop`, `extend`, `sort(reverse=...)`, `reverse`, `clear` and `del lst[i]`. `index`, `count`, `in`, `min`, `max`, `+` and `zip` work too, and they can be returned.
 
-Lists cost one copy per call. For very large data called often, NumPy arrays avoid the copy.
+Lists **passed in** are copied for the call:
+
+- **Lists of numbers** can be written (`lst[i] = x`, `lst.sort()`), and the new values are copied back into the same list object after the call succeeds. Each element keeps its type, so a list of floats only accepts float values (`lst[i] = float(x)`).
+- **Lists of strings** are read-only.
+- **No list passed in can grow or shrink.** Build a new one and return it.
+
+`sum()` of a list of floats isn't compiled, because Python 3.12+ adds Python floats with an extra-precise algorithm; write the loop yourself.
+
+Two names for one list (`b = a`) aren't compiled, because Python would share the object. Write `b = list(a)` for a copy. Lists cost one copy per call; for very large numeric data called often, NumPy arrays avoid it.
 
 ## Strings and bytes
 
@@ -91,9 +117,53 @@ def vowels(text: str) -> int:
     return count
 ```
 
-Strings are read character by character (any Unicode, including emoji). Supported: `len(s)`, `s[i]` (negative too), `for ch in s`, `enumerate(s)`, `==` `<` and the other comparisons between characters, `ch in "abc"` and `ch in s`, `ord(ch)`, `chr(i)`, and `ch.isdigit() isalpha() isalnum() isspace() isupper() islower() lower() upper()`. The character methods are exact for ASCII; any other character makes the call replay in Python, so results still match. A function can return one character (`-> str`). Building new strings (`+`, f-strings, `join`, `split`) isn't compiled.
+Strings work with any Unicode, including emoji.
+
+- **Reading:** `len(s)`, `s[i]` (negative too), slicing `s[a:b]`, `for ch in s`, `enumerate(s)`, comparisons (`==`, `<`, … by code point, like Python), and `in` (a character or a substring).
+- **Methods:** `find`, `rfind`, `index`, `count` (with start/end), `startswith`, `endswith`, `split()` and `split(sep)`, `strip`, `lstrip`, `rstrip` (with or without characters), `replace`, `join`, `lower`, `upper`, and `isdigit`, `isalpha`, `isalnum`, `isspace` on characters and whole strings.
+- **Building:** `+`, `s * n`, `s += t` (grows in place like CPython), f-strings with ints, bools and strings, and `str(int)`.
+- **Parsing:** `int(s)` and `float(s)`.
+
+These follow CPython's rules exactly, including whitespace for `split()`/`strip()` and the index rules for `find`. `lower`/`upper` and the `is...` tests are exact for ASCII. For other characters the call replays in Python, so results still match. Float formatting (`f"{x:.2f}"`, `str(1.5)`) isn't compiled: format floats outside the function.
 
 `bytes` work like a read-only list of ints: `b[i]` and `for x in b` give ints.
+
+## Dicts and sets
+
+```python
+STOP = frozenset({'the', 'a', 'of'})
+
+@optimize
+def word_counts(text: str) -> dict[str, int]:
+    counts = {}
+    for word in text.lower().split():
+        if word not in STOP:
+            counts[word] = counts.get(word, 0) + 1
+    return counts                               # a normal dict, in Python's insertion order
+
+@optimize
+def jaccard(a: str, b: str) -> float:
+    sa = set(a.split())
+    sb = set(b.split())
+    return len(sa & sb) / len(sa | sb) if sa | sb else 1.0
+```
+
+**Dicts** have str or int keys, and int, float, bool or str values (one type each).
+
+- **Compiled:** `d[k]`, `d[k] = v`, `d[k] += v`, `d.get(k, default)`, `d.pop(k[, default])`, `d.setdefault(k, v)`, `del d[k]`, `k in d`, `len(d)`, `d.clear()`, loops over `d`, `d.keys()`, `d.values()` and `d.items()`, `sorted(d)`, `max(d, key=d.get)` and `dict(d)`.
+- **Order:** dicts keep insertion order exactly like Python.
+- **Changing size inside a loop:** adding or removing keys while looping over the dict replays in Python, which raises the same `RuntimeError`.
+
+**Sets** have str or int elements.
+
+- **Compiled:** `set()`, `{a, b}`, `set(words)`, `add`, `discard`, `remove`, `update`, `clear`, `in`, `len`, `&`, `|`, `-`, `^`, `sorted(s)`, and returning a set.
+- **Not compiled:** looping over a set, because Python's set order can't be reproduced. Loop over `sorted(s)` instead.
+
+**General rules:**
+
+- Lists of strings, dicts and sets **passed in** are read-only in compiled code; build a new one and return it.
+- A helper function you call can fill a dict or list you made: `helper(words, counts)`.
+- Module-level constant collections must be `frozenset`s or tuples, because a global `set`/`dict` could change between calls.
 
 ## pandas
 
@@ -185,7 +255,7 @@ Rules that keep results identical to Python: each iteration writes only its own 
 
 ## What runs as Python
 
-Dicts, sets, list methods (`append`, ...), list literals other than `[value] * n`, building or formatting strings, classes and methods, closures, lambdas, generators, `try`/`with`, `print()`, slicing, `round(x, ndigits)`, `math.hypot`, `numpy.random`. Each comes with a hint in `explain()`.
+Classes and methods, closures, lambdas, generators, `try`/`with`, `print()`, float formatting, NumPy slices (they are views), mixed-type lists/dicts, float dict keys, loops over sets, global mutable `set`/`dict`/`list`, `round(x, ndigits)`, `math.hypot`, `numpy.random`. Each comes with a hint in `explain()`, or use `python -m pyrust_engine suggest file.py`.
 
 !!! note "NumPy scalars"
     In plain Python, `a[i]` and `for x in a` give NumPy scalars (`np.float64`). PyRust returns plain `float`/`int` with the same value. Comparisons between ints larger than 2**53 and floats replay in Python, because NumPy and Python compare them differently.

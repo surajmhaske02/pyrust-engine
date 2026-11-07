@@ -1,9 +1,10 @@
-# PyRust Engine API reference (0.7.1)
+# PyRust Engine API reference (0.7.2)
 
 Everything public is importable from `pyrust_engine`:
 
 ```python
-from pyrust_engine import (optimize, vectorize, prange, F64Array, I64Array, F64Array2, I64Array2, OptimizedFunction,
+from pyrust_engine import (optimize, vectorize, prange, F64Array, I64Array, F64Array2, I64Array2, F32Array, F32Array2,
+                           OptimizedFunction,
                            OptimizationError, PyRustFallbackWarning, RustToolchainWarning,
                            check_rust, doctor, Unsupported, prune_cache)
 ```
@@ -104,8 +105,12 @@ A function is compiled once per combination of argument types it is actually cal
 | `str` | read-only characters (Unicode code points) | `str` |
 | `bytes` | read-only, elements are ints | `bytes` |
 | pandas `Series`, `float64` / `int64`, index `0..n-1` | read-only, no copy | `pd.Series` |
+| NumPy `float32` 1-D / 2-D (NumPy 2) | array, NumPy 2 promotion rules | `F32Array` / `F32Array2` |
+| `list` of `str` | read-only, copied in | `list[str]` |
+| `dict` with str/int keys and int/float/bool/str values | read-only, copied in | `dict[str, int]`, ... |
+| `set` / `frozenset` of str or int | read-only, copied in | `set[str]`, `frozenset[int]` |
 
-Return values: one scalar type, one character (`-> str`), a tuple of scalars, a new NumPy array or list created in the function (`np.zeros(n)`, `[0.0] * n`), or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
+Return values: one scalar type (including `np.float32`), a string, a tuple of scalars, a new NumPy array, a list (of floats, ints or strings), a dict or a set created in the function, or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
 
 ## Random numbers
 
@@ -162,6 +167,23 @@ When Rust is missing or broken, `check_rust()` returns `ok: False`, a one-line `
 | Windows `link.exe` missing | Visual Studio Build Tools with C++ |
 | Linux `cc` missing | `sudo apt install build-essential` |
 
+## `pyrust_engine.ai`
+
+Ready-made compiled functions for AI applications (see [AI and agents](ai.md)):
+
+| Function | Returns |
+|---|---|
+| `cosine_top_k(query, matrix, k=10)` | `(indices, scores)` of the k most similar rows; float32 or float64; all CPU cores |
+| `top_k(scores, k)` | `(indices, scores)` of the k largest values, best first, ties by index |
+| `BM25(documents, k1=1.5, b=0.75)` | index with `.scores(query)` and `.search(query, k)`; Lucene-style idf |
+| `tokenize(text)` | lower-case runs of letters and digits |
+| `chunk_text(text, size=1000, overlap=200)` | pieces of at most `size` characters broken at spaces |
+| `ngrams(tokens, n=2)` | n-grams joined by spaces |
+| `levenshtein(a, b)`, `similarity(a, b)` | edit distance; 1 - distance / longest length |
+| `jaccard(tokens_a, tokens_b)` | shared distinct tokens / all distinct tokens |
+| `minhash(tokens, num_perm=128, seed=1)`, `minhash_similarity(a, b)` | signature (list of ints); estimated Jaccard similarity |
+| `token_f1(prediction, truth)`, `exact_match(prediction, truth)`, `rouge_l(candidate, reference)` | evaluation metrics |
+
 ## Command line
 
 ```sh
@@ -169,10 +191,15 @@ python -m pyrust_engine doctor                     # Python, Rust, linker, NumPy
 python -m pyrust_engine build file.py [--out DIR]   # compile ahead of time into __pyrust__/
 python -m pyrust_engine check file.py [--json]     # explain every function in a file
 python -m pyrust_engine profile script.py [args]    # run a script once, rank hot functions
+python -m pyrust_engine suggest file.py [--json]   # per function: compiles? worth it? what to change
+python -m pyrust_engine apply file.py [--write]    # add @optimize where it compiles (diff unless --write)
+python -m pyrust_engine mcp                        # MCP server for coding agents (stdin/stdout)
 python -m pyrust_engine cache [--days 30] [--delete] [--directory DIR]
 ```
 
-`check` loads the file without running its `if __name__ == "__main__":` block. `profile` runs the script. Only use either on trusted code.
+`check`, `suggest` and `apply` load the file without running its `if __name__ == "__main__":` block. `profile` runs the script. Only use them on trusted code. The `pyrust-engine` and `pyrust-mcp` commands are installed too.
+
+`suggest --json` returns `{"file", "functions": [{"function", "line", "decorated", "has_loop", "compiles", "return_type", "problem": {"line", "message", "code", "hint"}, "action"}], "summary"}`. `apply --json` returns `{"file", "decorated", "written", "diff", "note"}`.
 
 ## Jupyter
 
