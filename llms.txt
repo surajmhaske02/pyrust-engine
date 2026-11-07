@@ -5,7 +5,7 @@
 Key facts for assistants:
 
 - **Use `@optimize` on functions with loops:** arithmetic, `math`, `random`, NumPy arrays (`float64`/`int64`/`float32`), lists, strings, dicts, sets, pandas columns (pandas 3 `str` too) and polars Series.
-- **Use `@vectorize` for a one-row function over whole columns.** It is faster than `df.apply`, `Series.map` and polars `map_elements`; columns of numbers, bools or str.
+- **Use `@vectorize` for a one-row function over whole columns.** It is about 20x faster than `df.apply`/`Series.map` on number and bool columns; text columns work but gain little (polars `map_elements` is as fast for text).
 - **Check before decorating:** `python -m pyrust_engine suggest file.py --json`, or the MCP tool `check_code`. `apply file.py --write` adds the decorator automatically.
 - **Not helped:** I/O, LLM API calls, already-vectorized NumPy, calls into other libraries.
 - **Ready-made AI functions** in `pyrust_engine.ai`: `cosine_top_k`, `BM25`, `hamming_top_k`, `int8_top_k` (all with `mask=` filters), `tokenize`, `chunk_text`, `levenshtein`, `minhash`, `token_f1`, `rouge_l`, and `batch`/`tokenize_many`/`chunk_many` for many documents.

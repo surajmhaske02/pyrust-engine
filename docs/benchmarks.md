@@ -39,6 +39,26 @@ Dict and string code gains less than numeric loops because CPython's own dicts a
 
 Lists are copied for each call, so simple work on big lists gains less; pass a NumPy array to skip the copy. `random` calls copy Python's generator state (about 5 KB) in and out once per call.
 
+New in 0.7.3 (CI, Python 3.13; Linux x86_64 / macOS Apple Silicon / Windows x86_64):
+
+| Workload | Baseline | Linux | macOS | Windows |
+|---|---|---:|---:|---:|
+| Native call of a tiny function (`native_loop_free=True`), per call | 0.7.2: 4.5 µs on Linux | **2.8 µs** | 1.3 µs | 1.8 µs |
+| `BM25Okapi` query, 5,000 documents | `rank_bm25` | **15x** | 25x | 25x |
+| `BM25Okapi` build, 5,000 documents | `rank_bm25` | 1.1x | 0.7x | 0.9x |
+| `hamming_top_k`, 200k x 384-bit codes | NumPy (`np.bitwise_count`) | **3.4x** | 1.8x | 4.7x |
+| `int8_top_k`, 100k x 384 int8 | NumPy (cast to int32, then matmul) | 1.0x | 1.0x | 1.6x |
+| `tokenize_many`, 2,000 documents | `tokenize` one by one (also compiled) | 1.2x | 1.1x | 1.2x |
+| `@vectorize` over a 200k-row **text** column | pandas `Series.map` | 1.4x | 2.1x | 0.9x |
+| `@vectorize` over a 200k-row **text** column | polars `map_elements` | 0.5x | 1.0x | 0.4x |
+
+What these numbers mean:
+
+- **BM25Okapi** returns exactly rank_bm25's scores. Queries touch only the documents that contain the words, so they are much faster; building the index costs about the same.
+- **Binary codes** are 32x smaller than float32 and faster to search than with NumPy. **int8** search is about as fast as NumPy, but NumPy needs an int32 copy of the whole matrix on every query (4x the memory of the int8 matrix), and `int8 @ int8` in NumPy overflows.
+- **Text columns:** converting 200k Python strings to native strings costs about as much as calling a small Python function on each, so the gain is small, and polars' own `map_elements` is faster for text. Number and bool columns are read without copying and gain 20x or more (see `@vectorize` above). Use `@vectorize` for text when the function does real work per row (loops, several string operations).
+- **Threads with the GIL:** `tokenize_many` gains little, because converting strings in and out takes turns on the GIL. On free-threaded Python (3.14t) nothing takes turns.
+
 ## Compared with Numba
 
 The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12. Speedup over plain Python in that run:

@@ -6,7 +6,8 @@ a drop-in BM25 for `rank_bm25`, compact vector search with filters, and batches 
 **Faster calls**
 - Functions with `int`/`float`/`bool` arguments and a number, bool or `None` result get a
   second native entry point that returns the value and the status in one struct. The
-  Python side no longer builds out-parameter objects; per-call cost is about half.
+  Python side no longer builds out-parameter objects; per-call cost is about 40% lower
+  (2.8 µs instead of 4.5 µs on the Linux CI machine).
 - Fewer lock and dict operations per call; a failed fast call continues on the normal path
   without running the native code twice.
 
@@ -32,6 +33,12 @@ a drop-in BM25 for `rank_bm25`, compact vector search with filters, and batches 
 - `int.bit_count()`.
 - One-character strings use whole-string methods: `','.join(words)`, `'-'.split(...)`
   (they did not compile before).
+
+**Measured honestly (see the benchmarks page):** BM25Okapi queries 15–25x faster than
+rank_bm25 with the same scores (building costs about the same); binary search 1.8–4.7x
+faster than NumPy; int8 search as fast as NumPy without its int32 copy; text columns in
+`@vectorize` only 0.9–2.1x vs pandas `map` and slower than polars `map_elements`;
+`tokenize_many` 1.1–1.2x with the GIL.
 
 **Platforms**
 - Free-threaded Python 3.14t is tested in CI on Linux, macOS and Windows; the GIL stays off.
