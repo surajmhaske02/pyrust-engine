@@ -87,6 +87,74 @@ def ai_rows(cache, rng):
                  'note':'baseline is vectorized NumPy (BLAS), not a Python loop'})
     return rows
 
+def v073_rows(cache, rng):
+    """0.7.3: BM25Okapi vs rank_bm25, binary/int8 search vs NumPy, batches, str columns."""
+    from pyrust_engine import ai
+    from .workloads import domain_length
+    rows=[]
+    def add(name, slow, fast, args=(), note=None, check=None):
+        if check is not None:
+            check()
+        a=measure(slow,args);b=measure(fast,args)
+        row={'name':name,'python':a,'pyrust':b,'python_over_pyrust':a['median_seconds']/b['median_seconds']}
+        if note: row['note']=note
+        rows.append(row)
+    words=[f'w{i}' for i in range(3000)]
+    corpus=[[words[int(x)] for x in rng.zipf(1.3,size=60)%3000] for _ in range(5000)]
+    query=['w1','w17','w250','w2999']
+    try:
+        from rank_bm25 import BM25Okapi as Reference
+    except ImportError:
+        Reference=None
+    if Reference is not None:
+        ref=Reference(corpus);ours=ai.BM25Okapi(corpus)
+        assert np.array_equal(ref.get_scores(query),ours.get_scores(query))
+        add('bm25okapi_build_5k_docs_vs_rank_bm25',lambda:Reference(corpus),lambda:ai.BM25Okapi(corpus),
+            note='baseline is the rank_bm25 package (pure Python)')
+        add('bm25okapi_query_5k_docs_vs_rank_bm25',ref.get_scores,ours.get_scores,(query,),
+            note='baseline is the rank_bm25 package; scores are identical')
+    codes=rng.integers(0,256,(200_000,48),dtype=np.uint8);q=codes[77]^np.uint8(1)
+    def numpy_hamming(q,m):
+        d=np.bitwise_count(m^q).sum(axis=1,dtype=np.int64) if hasattr(np,'bitwise_count') else np.unpackbits(m^q,axis=1).sum(axis=1)
+        return ai.top_k(-d,10)[0]
+    add('hamming_top10_200k_x_384bit_vs_numpy',numpy_hamming,lambda q,m:ai.hamming_top_k(q,m,10)[0],(q,codes),
+        note='baseline is NumPy (np.bitwise_count)',
+        check=lambda:np.testing.assert_array_equal(numpy_hamming(q,codes),ai.hamming_top_k(q,codes,10)[0]))
+    m8=rng.integers(-127,128,(100_000,384),dtype=np.int8);q8=m8[5]
+    def numpy_int8(q,m):
+        return ai.top_k(m.astype(np.int32)@q.astype(np.int32),10)[0]
+    add('int8_top10_100k_x_384_vs_numpy',numpy_int8,lambda q,m:ai.int8_top_k(q,m,10)[0],(q8,m8),
+        note='baseline is NumPy casting to int32 then matmul (int8 @ int8 would overflow)',
+        check=lambda:np.testing.assert_array_equal(numpy_int8(q8,m8),ai.int8_top_k(q8,m8,10)[0]))
+    texts=[' '.join(f'Token{int(x)} and, more!' for x in rng.integers(0,10**6,400)) for _ in range(2000)]
+    one_by_one=lambda ts:[ai.tokenize(t) for t in ts]
+    add('tokenize_many_2000_docs_threads_vs_one_by_one',one_by_one,ai.tokenize_many,(texts,),
+        note='both compiled; shows the gain from running on several threads',
+        check=lambda:assert_same(one_by_one(texts),ai.tokenize_many(texts)))
+    emails=[f'user{i}@{"example" if i%3 else "site"}.com' if i%7 else f'user{i}' for i in range(200_000)]
+    fast=vectorize(domain_length,cache_dir=cache,fallback=False)
+    try:
+        import pandas as pd
+        column=pd.Series(emails)
+        add('vectorize_str_column_vs_pandas_map',lambda c:c.map(domain_length),fast,(column,),
+            note='pandas Series of str (pandas 3 str dtype when installed)',
+            check=lambda:assert_same(column.map(domain_length).tolist(),fast(column).tolist()))
+    except ImportError:
+        pass
+    try:
+        import polars as pl
+        pcol=pl.Series('email',emails)
+        slow=lambda c:c.map_elements(domain_length,return_dtype=pl.Int64)
+        add('vectorize_str_column_vs_polars_map_elements',slow,fast,(pcol,),
+            note='polars map_elements (Python function per row)',
+            check=lambda:assert_same(slow(pcol).to_list(),fast(pcol).to_list()))
+    except ImportError:
+        pass
+    return rows
+
+def assert_same(a,b):
+    assert a==b
+
 def run():
     try:
         import numba
@@ -153,6 +221,7 @@ def run():
         rows.append({'name':'vectorize_tiny_function','python':a,'pyrust':b,
                      'python_over_pyrust':a['median_seconds']/b['median_seconds'],'report':fast.report()})
         rows += ai_rows(cache, rng)
+        rows += v073_rows(cache, rng)
         payload=json.dumps(rng.standard_normal(20_000).tolist())
         native=optimize(array_energy,cache_dir=cache,fallback=False);native.prepare()
         def pipeline(kernel):

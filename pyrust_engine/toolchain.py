@@ -220,6 +220,11 @@ def doctor(stream=None):
     )
     ok &= python_ok
     say(f'Platform      : {platform.system()} {platform.machine()}')
+    gil = getattr(sys, '_is_gil_enabled', None)
+    if gil is not None and not gil():
+        say('Threads       : free-threaded Python (no GIL): threads run Python and native code in parallel')
+    else:
+        say('Threads       : GIL enabled: native calls release it, so their work runs in parallel')
     status = check_rust()
     if status['ok']:
         say(f'Rust          : {status["version"]} ({status["rustc"]})')

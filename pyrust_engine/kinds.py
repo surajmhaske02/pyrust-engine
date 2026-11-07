@@ -2,7 +2,8 @@
 
 Scalars: 'i64' int, 'f64' float, 'f32' NumPy float32, 'bool', 'char' (one character),
 'strv' (a string value). Sequences passed as (pointer, rows, cols): NumPy arrays, lists
-of numbers, pandas Series, str and bytes (see ARRAY_INFO). Containers: 'slist' (list of
+of numbers, pandas and polars Series, str and bytes (see ARRAY_INFO). Series of str
+('sseries' pandas, 'plsseries' polars) are passed like lists of str. Containers: 'slist' (list of
 str), 'dict(K,V)' and 'set(K)' with K in i64/strv and V in i64/f64/bool/strv.
 """
 
@@ -18,13 +19,29 @@ ARRAY_INFO = {
     'ilist': ('i64', 1),
     'series': ('f64', 1),
     'iseries': ('i64', 1),
+    'fseries': ('f32', 1),
+    'plseries': ('f64', 1),
+    'iplseries': ('i64', 1),
     'str': ('u32', 1),
     'bytes': ('u8', 1),
 }
 ARRAY_KINDS = tuple(ARRAY_INFO)
 NUMPY_KINDS = ('array', 'iarray', 'array2', 'iarray2', 'farray', 'farray2')
 LIST_KINDS = ('flist', 'ilist')
-READ_ONLY_KINDS = ('series', 'iseries', 'str', 'bytes')
+READ_ONLY_KINDS = ('series', 'iseries', 'fseries', 'plseries', 'iplseries', 'str', 'bytes')
+# pandas Series: s[i] looks up the label i, so negative i raises KeyError (polars indexes like a list).
+PANDAS_SERIES = ('series', 'iseries', 'fseries')
+SERIES_NAMES = {
+    'series': 'pandas Series',
+    'iseries': 'pandas Series',
+    'fseries': 'pandas Series',
+    'plseries': 'polars Series',
+    'iplseries': 'polars Series',
+    'str': 'str',
+    'bytes': 'bytes',
+}
+# Series of str are compiled as read-only lists of str with Series indexing rules.
+STR_SERIES = ('sseries', 'plsseries')
 ELEMENT = {k: v[0] for k, v in ARRAY_INFO.items()}
 # What reading one element gives: str elements are one-character strings, bytes elements are ints.
 READ_KIND = {'f64': 'f64', 'i64': 'i64', 'f32': 'f32', 'u32': 'char', 'u8': 'i64'}
@@ -35,6 +52,9 @@ RUST_TYPE = {'i64': 'i64', 'f64': 'f64', 'f32': 'f32', 'bool': 'bool', 'char': '
 ZERO = {'i64': '0', 'f64': '0.0', 'f32': '0.0', 'bool': 'false', 'char': '0', 'strv': 'S::default()'}
 KEY_KINDS = ('i64', 'strv')
 ITEM_KINDS = ('i64', 'f64', 'bool', 'strv')
+# Kinds served by the pyrust_fast entry point (value and status returned together).
+FAST_KINDS = ('i64', 'f64', 'bool')
+FAST_RETURNS = ('i64', 'f64', 'bool', 'none')
 PLACEHOLDERS = {'list?': 'flist', 'dict?': 'dict(i64,i64)', 'set?': 'set(i64)'}
 
 

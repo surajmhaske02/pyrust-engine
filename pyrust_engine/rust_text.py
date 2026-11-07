@@ -1,4 +1,4 @@
-"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.2).
+"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.3).
 
 Every helper reproduces CPython's behaviour for the cases it accepts and returns an
 error status for anything else, so the call replays in Python:
@@ -73,6 +73,7 @@ fn s_push(s:&mut S,t:&[u32]){
 fn s_cat(a:&[u32],b:&[u32])->S{let mut v=Vec::with_capacity(a.len()+b.len()); v.extend_from_slice(a); v.extend_from_slice(b); sown(v)}
 fn s_at(s:&[u32],i:i64)->Result<u32,i32>{let j=index(s.len(),i)?; Ok(s[j])}
 fn v_at<T:Clone>(v:&[T],i:i64)->Result<T,i32>{let j=index(v.len(),i)?; Ok(v[j].clone())}
+fn v_at_nn<T:Clone>(v:&[T],i:i64)->Result<T,i32>{if i<0 {return Err(3)} v_at(v,i)}
 fn v_put<T>(v:&mut [T],i:i64,x:T)->Result<(),i32>{let j=index(v.len(),i)?; v[j]=x; Ok(())}
 // Slice bounds with step 1 (PySlice_AdjustIndices).
 fn s_adj(n:i64,i:Option<i64>,d:i64)->i64{match i {None=>d, Some(mut v)=>{if v<0 {v+=n; if v<0 {v=0}} else if v>n {v=n} v}}}

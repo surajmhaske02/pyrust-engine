@@ -143,7 +143,8 @@ class Compile(unittest.TestCase):
         self.assertEqual(kind_of_value(pd.DataFrame({'a': [1.0, 2.0]})['a']), 'series')
         self.assertIsNone(kind_of_value(pd.Series([1.0], index=[5])))
         self.assertIsNone(kind_of_value(pd.Series([1, None], dtype='Int64')))
-        self.assertIsNone(kind_of_value(pd.Series(['a', 'b'])))
+        self.assertEqual(kind_of_value(pd.Series(['a', 'b'])), 'sseries')  # 0.7.3: str Series compile
+        self.assertIsNone(kind_of_value(pd.Series(['a', None])))
 
     def test_fallback_gives_python_results(self):
         # Without Rust (or for values that cannot compile) results are Python's own.

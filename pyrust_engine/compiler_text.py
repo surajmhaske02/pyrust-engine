@@ -22,6 +22,7 @@ from .kinds import (
     LIST_KINDS,
     NUMPY_KINDS,
     PLACEHOLDERS,
+    READ_ONLY_KINDS,
     TEXT,
     dict_parts,
     is_container,
@@ -32,6 +33,21 @@ from .kinds import (
     zero,
 )
 
+# str methods that a one-character string (',' or s[i]) also runs as a whole string.
+CHAR_AS_TEXT = (
+    'join',
+    'split',
+    'find',
+    'rfind',
+    'index',
+    'count',
+    'startswith',
+    'endswith',
+    'strip',
+    'lstrip',
+    'rstrip',
+    'replace',
+)
 MUTATING_METHODS = {
     'append',
     'extend',
@@ -101,7 +117,7 @@ class TextMixin:
         if self.parallel is not None:
             self.fail(node, 'lists, dicts and sets cannot be changed inside prange', 'Use a normal range loop.')
         if name in self.params:
-            if self.is_top and (is_packed(self.types[name]) or self.types[name] in ('series', 'iseries')):
+            if self.is_top and (is_packed(self.types[name]) or self.types[name] in READ_ONLY_KINDS):
                 self.fail(
                     node,
                     f'{name!r} was passed in and is read-only in compiled code',
@@ -331,7 +347,8 @@ class TextMixin:
             text = self.as_text(value, kind, base) if not isinstance(base, ast.Name) else self.text(base)[0]
             return f's_at({text},{self.expect(n.slice, "i64")})?', 'char'
         if kind == 'slist':
-            return f'v_at({ref},{self.expect(n.slice, "i64")})?', 'strv'
+            helper = 'v_at_nn' if isinstance(base, ast.Name) and self.str_series.get(base.id) == 'sseries' else 'v_at'
+            return f'{helper}({ref},{self.expect(n.slice, "i64")})?', 'strv'
         if is_dict(kind):
             k, v = dict_parts(kind)
             return f'{ref}.need(&{self.item(n.slice, k)})?', v
@@ -398,6 +415,8 @@ class TextMixin:
         else:
             value = None
         if kind == 'char':
+            if func.attr in CHAR_AS_TEXT:
+                return self.string_method(n, func.attr, base)  # ','.join(words), '-'.split(...)
             return None  # one-character methods are handled by the scalar compiler
         if kind in ('str', 'strv'):
             return self.string_method(n, func.attr, base)
@@ -641,9 +660,9 @@ class TextMixin:
                 self.fail(n, 'sorted(..., reverse=...) needs True or False written in the code')
             rev = 'true' if reverse.value else 'false'
         ref, kind = self.materialize(arg)
-        if kind in ('array', 'flist', 'series'):
+        if kind in ('array', 'flist', 'series', 'plseries'):
             return f'({{ let mut t = av({ref}).to_vec(); sort_f(&mut t,{rev})?; arr_from(t,0.0f64)? }})', 'flist'
-        if kind in ('iarray', 'ilist', 'iseries'):
+        if kind in ('iarray', 'ilist', 'iseries', 'iplseries'):
             return f'({{ let mut t = av({ref}).to_vec(); sort_o(&mut t,{rev}); arr_from(t,0i64)? }})', 'ilist'
         if kind == 'slist':
             return f'({{ let mut t = {ref}.clone(); sort_o(&mut t,{rev}); t }})', 'slist'
@@ -696,7 +715,7 @@ class TextMixin:
     def sequence_best(self, n, name, arg):
         ref, kind = self.materialize(arg)
         low = 'true' if name == 'min' else 'false'
-        if kind in ('array', 'iarray', 'flist', 'ilist', 'series', 'iseries'):
+        if kind in ('array', 'iarray', 'flist', 'ilist', 'series', 'iseries', 'plseries', 'iplseries'):
             return f'seq_max(av({ref}),{low})?', ELEMENT[kind]
         if kind == 'slist':
             return f'seq_max({ref}.as_slice(),{low})?', 'strv'

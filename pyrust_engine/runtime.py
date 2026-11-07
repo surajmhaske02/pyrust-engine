@@ -54,6 +54,11 @@ _TYPE_NAMES = {
     'ilist': 'list[int]',
     'series': 'pandas.Series[float64]',
     'iseries': 'pandas.Series[int64]',
+    'fseries': 'pandas.Series[float32]',
+    'sseries': 'pandas.Series[str]',
+    'plseries': 'polars.Series[float]',
+    'iplseries': 'polars.Series[int]',
+    'plsseries': 'polars.Series[str]',
     'str': 'str',
     'bytes': 'bytes',
     'char': 'str (one character)',
@@ -74,7 +79,29 @@ _CTYPE = {
 }
 _ELEMENT_CTYPE = {'f64': ctypes.c_double, 'i64': ctypes.c_int64, 'f32': ctypes.c_float}
 _LIST_TYPECODE = {'flist': 'd', 'ilist': 'q'}
+_SERIES_DTYPE = {
+    'series': 'float64',
+    'iseries': 'int64',
+    'fseries': 'float32',
+    'plseries': 'float64',
+    'iplseries': 'int64',
+}
 _NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64', 'f32': 'float32'}
+
+
+def _fast_result(ctype):
+    class Result(ctypes.Structure):
+        _fields_ = [('value', ctype), ('status', ctypes.c_int32)]
+
+    return Result
+
+
+_FAST_RESULT = {
+    'i64': _fast_result(ctypes.c_int64),
+    'f64': _fast_result(ctypes.c_double),
+    'bool': _fast_result(ctypes.c_bool),
+    'none': _fast_result(ctypes.c_uint8),
+}
 FAST_BUDGET = 50_000_000  # iterations run inline; longer calls move to an interruptible thread
 UNLIMITED = 2**64 - 1
 MAX_SPECIALIZATIONS = 16
@@ -278,6 +305,9 @@ class _Native:
         'has_arrays',
         'any_written',
         'random',
+        'fast',
+        'checks',
+        'void',
     )
 
     def __init__(self, lib, description):
@@ -325,6 +355,15 @@ class _Native:
             argtypes += [ctypes.c_void_p, ctypes.c_void_p]
         self.entry.argtypes = argtypes
         self.entry.restype = ctypes.c_int32
+        self.checks = bool(self.guards or self.code_guards)
+        self.void = rt == 'none'
+        self.fast = None
+        if description.fast_eligible():
+            # Scalars in, one scalar out: value and status come back together in a struct.
+            fast = lib.pyrust_fast
+            fast.argtypes = argtypes[: len(self.kinds)]
+            fast.restype = _FAST_RESULT[rt]
+            self.fast = fast
 
     def result(self, outs):
         rt = self.returns
@@ -405,6 +444,7 @@ class _RandomState:
 
 class _Failure:
     __slots__ = ('reason', 'toolchain')
+    fast = None  # never takes the fast call path
 
     def __init__(self, reason, toolchain_problem):
         self.reason = reason
@@ -426,8 +466,19 @@ def _unsupported_value(value):
         return 'list elements must be all floats or all 64-bit ints'
     pd = sys.modules.get('pandas')
     if pd is not None and isinstance(value, pd.Series):
-        return 'pandas Series must have a float64 or int64 dtype and the default 0..n-1 index (use .reset_index(drop=True))'
+        return (
+            'pandas Series must have a float64, int64, float32 or str dtype with no missing values '
+            'and the default 0..n-1 index (use .reset_index(drop=True))'
+        )
+    pl = sys.modules.get('polars')
+    if pl is not None and isinstance(value, pl.Series):
+        return 'polars Series must hold floats, ints (up to 64-bit signed) or str, with no nulls'
     return f'{type(value).__name__} values are not compiled'
+
+
+_SCALAR_KINDS = {float: 'f64', bool: 'bool'}
+_I64_MIN = -9223372036854775808
+_I64_MAX = 9223372036854775807
 
 
 def _kinds_of(values):
@@ -435,13 +486,9 @@ def _kinds_of(values):
     for value in values:
         t = type(value)
         if t is int:
-            out.append('i64' if -9223372036854775808 <= value <= 9223372036854775807 else None)
-        elif t is float:
-            out.append('f64')
-        elif t is bool:
-            out.append('bool')
+            out.append('i64' if _I64_MIN <= value <= _I64_MAX else None)
         else:
-            out.append(kind_of_value(value))
+            out.append(_SCALAR_KINDS.get(t) or kind_of_value(value))
     return tuple(out)
 
 
@@ -598,10 +645,10 @@ class _Optimized:
                     f'{fn.__qualname__} ran as plain Python: {reason}\n'
                     '(Shown once: this applies to every @optimize function until Rust works.)',
                     RustToolchainWarning,
-                    stacklevel=3,
+                    stacklevel=4,
                 )
             else:
-                warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}', PyRustFallbackWarning, stacklevel=3)
+                warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}', PyRustFallbackWarning, stacklevel=4)
         start = time.perf_counter()
         try:
             return fn(*args, **kwargs)
@@ -738,8 +785,10 @@ class _Optimized:
                 keep.append(buffer)
                 if writes:
                     copies.append((value, buffer))
-            elif kind in ('series', 'iseries'):
+            elif kind in _SERIES_DTYPE:
                 data = value.to_numpy()
+                if data.dtype != _SERIES_DTYPE[kind]:
+                    data = data.astype(_SERIES_DTYPE[kind])  # polars ints/float32: exact widening
                 flags = data.flags
                 if not (data.dtype.isnative and flags.c_contiguous and flags.aligned):
                     import numpy as np
@@ -757,6 +806,8 @@ class _Optimized:
             elif kind == 'bytes':
                 args += [ctypes.cast(ctypes.c_char_p(value), ctypes.c_void_p).value, len(value), 1]
             elif is_packed(kind):
+                if kind == 'slist' and type(value) is not list:
+                    value = value.to_list()  # pandas / polars Series of str
                 data = packing.pack(kind, value)
                 args += [ctypes.cast(ctypes.c_char_p(data), ctypes.c_void_p).value, len(data)]
                 keep.append(data)
@@ -824,8 +875,7 @@ class _Optimized:
         perf_counter = time.perf_counter
         byref = ctypes.byref
 
-        @functools.wraps(fn)
-        def wrapped(*args, **kwargs):
+        def general(args, kwargs, first_status=None):
             start = perf_counter() if timing else 0.0
             native_elapsed = None
             try:
@@ -882,7 +932,10 @@ class _Optimized:
                         return python_call(str(exc), args, kwargs)
                     extra = rng.pointers
                 t0 = perf_counter() if timing else 0.0
-                status = native.entry(*native_args, *refs, budget, None, *extra)
+                if first_status is None:
+                    status = native.entry(*native_args, *refs, budget, None, *extra)
+                else:
+                    status = first_status  # the fast entry point already ran this call and failed
                 if status == 4 and not strict_budget:
                     if copies:  # lists are not undone natively: start again from the originals
                         for target, buffer in copies:
@@ -913,6 +966,42 @@ class _Optimized:
                         state['native_seconds'] += native_elapsed
                         state['reason'] = None
                         state['backend'] = 'rust'
+
+        code0, defaults0, kwdefaults0 = original
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            # Fast path: exact positional call of a scalar specialization (no out-parameter
+            # objects, one ctypes call returning value and status together).
+            if (
+                not timing
+                and not kwargs
+                and len(args) == n_params
+                and fn.__code__ is code0
+                and fn.__defaults__ is defaults0
+                and fn.__kwdefaults__ is kwdefaults0
+            ):
+                native = specs.get(_kinds_of(args))
+                if native is not None and native.fast is not None:
+                    if native.checks:
+                        for namespace, builtin_ns, name, expected in native.guards:
+                            if namespace.get(name, builtin_ns.get(name)) is not expected:
+                                return general(args, kwargs)
+                        for callee, code, defaults in native.code_guards:
+                            if callee.__code__ is not code or callee.__defaults__ is not defaults:
+                                return general(args, kwargs)
+                    result = native.fast(*args)
+                    status = result.status
+                    if status:
+                        return general(args, kwargs, status)
+                    with metrics_lock:
+                        state['calls'] += 1
+                        state['native_calls'] += 1
+                        if state['reason'] is not None or state['backend'] != 'rust':
+                            state['reason'] = None
+                            state['backend'] = 'rust'
+                    return None if native.void else result.value
+            return general(args, kwargs)
 
         def rust_source(kinds=None):
             if kinds is None:

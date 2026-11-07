@@ -139,3 +139,9 @@ def dot32(a, b):
     for i in range(len(a)):
         total += a[i] * b[i]
     return total
+
+
+def domain_length(email: str) -> int:
+    """Length of the domain part of an e-mail address (0 if there is no @)."""
+    at = email.find('@')
+    return len(email) - at - 1 if at >= 0 else 0

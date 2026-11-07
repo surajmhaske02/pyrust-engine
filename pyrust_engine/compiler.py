@@ -8,7 +8,9 @@ Kinds used for values:
   'array' / 'iarray' 1-D float64 / int64 NumPy arrays,
   'array2' / 'iarray2' 2-D float64 / int64 NumPy arrays,
   'flist' / 'ilist' Python lists of floats / ints (copied in, copied back after writes),
-  'series' / 'iseries' pandas Series of float64 / int64 with a default 0..n-1 index (read-only),
+  'series' / 'iseries' / 'fseries' pandas Series of float64 / int64 / float32 with a default 0..n-1 index,
+  'plseries' / 'iplseries' polars Series of floats / ints without nulls (all Series are read-only),
+  'sseries' / 'plsseries' pandas / polars Series of str (compiled as read-only lists of str),
   'str' strings (read-only; elements are 'char', one character) and 'bytes' (read-only; elements are ints),
   'tuple(k1,k2,...)' tuples of scalars (return values and unpacking only),
   'none' for functions that return None.
@@ -82,15 +84,20 @@ from .kinds import (  # noqa: F401, E402  (re-exported for the runtime)
     ARRAY_INFO,
     ARRAY_KINDS,
     ELEMENT,
+    FAST_KINDS,
+    FAST_RETURNS,
     ITEM_KINDS,
     KEY_KINDS,
     LIST_KINDS,
     NUMPY_KINDS,
+    PANDAS_SERIES,
     PLACEHOLDERS,
     READ_KIND,
     READ_ONLY_KINDS,
     RUST_TYPE,
     SCALARS,
+    SERIES_NAMES,
+    STR_SERIES,
     TEXT,
     VALUES,
     ZERO,
@@ -643,22 +650,46 @@ def dict_kind(value):
 
 
 def series_kind(value):
-    """'series' / 'iseries' for a NumPy-backed float64 / int64 pandas Series with index 0..n-1."""
+    """Kind of a pandas Series (default 0..n-1 index) or polars Series (no nulls), else None."""
     pd = sys.modules.get('pandas')
     np = sys.modules.get('numpy')
-    if pd is None or np is None or not isinstance(value, pd.Series):
+    if np is None:
         return None
-    index = value.index
-    if type(index) is not pd.RangeIndex or index.start != 0 or index.step != 1:
+    if pd is not None and isinstance(value, pd.Series):
+        index = value.index
+        if type(index) is not pd.RangeIndex or index.start != 0 or index.step != 1:
+            return None
+        dtype = value.dtype
+        if isinstance(dtype, np.dtype):
+            if dtype == np.float64:
+                return 'series'
+            if dtype == np.int64:
+                return 'iseries'
+            if dtype == np.float32 and NUMPY2():
+                return 'fseries'
+            if dtype.kind == 'O' and _all_str(value):
+                return 'sseries'
+            return None
+        # pandas 3 stores text as the 'str' dtype; missing values make it run as Python.
+        if isinstance(dtype, pd.StringDtype) and not value.hasnans and _all_str(value):
+            return 'sseries'
         return None
-    dtype = value.dtype
-    if not isinstance(dtype, np.dtype):  # nullable and other extension dtypes
-        return None
-    if dtype == np.float64:
-        return 'series'
-    if dtype == np.int64:
-        return 'iseries'
+    pl = sys.modules.get('polars')
+    if pl is not None and isinstance(value, pl.Series):
+        if value.null_count():
+            return None
+        dtype = value.dtype
+        if dtype in (pl.Float64, pl.Float32):
+            return 'plseries'  # elements are Python floats (float32 values widen exactly)
+        if dtype in (pl.Int64, pl.Int32, pl.Int16, pl.Int8, pl.UInt32, pl.UInt16, pl.UInt8):
+            return 'iplseries'
+        if dtype == pl.String:
+            return 'plsseries'
     return None
+
+
+def _all_str(series):
+    return set(map(type, series.tolist())) <= {str}
 
 
 _ITEM = {
@@ -750,6 +781,11 @@ class Compiler(TextMixin):
                 raise Unsupported(f'{function.__name__}: *args, **kwargs and keyword-only parameters are unsupported')
         self.params = list(self.signature.parameters)
         self.types = dict(kinds) if kinds is not None else default_kinds(function)
+        # Series of str compile as read-only lists of str; uses that mean something else on a
+        # Series (operators, `in`, methods) are rejected by check_series_uses.
+        self.str_series = {p: k for p, k in self.types.items() if k in STR_SERIES}
+        for p in self.str_series:
+            self.types[p] = 'slist'
         self.globals = function.__globals__
         ns = function.__builtins__
         self.builtins_ns = ns if isinstance(ns, dict) else vars(ns)
@@ -978,7 +1014,7 @@ class Compiler(TextMixin):
                 'Build a new list/dict/set inside the function and return it.',
             )
         if kind in READ_ONLY_KINDS:
-            what = {'series': 'pandas Series', 'iseries': 'pandas Series', 'str': 'str', 'bytes': 'bytes'}[kind]
+            what = SERIES_NAMES[kind]
             self.fail(
                 node,
                 f'{name!r} is a {what}, which compiled code can only read',
@@ -1028,7 +1064,7 @@ class Compiler(TextMixin):
         if len(idx) == 2:
             return f'at2({self.aref(name)},{",".join(idx)})?', READ_KIND[ELEMENT[kind]]
         # s[i] on a Series looks up the label i (index 0..n-1); s.iloc[i] is positional.
-        fn = 'at_nn' if kind in ('series', 'iseries') and not positional else 'at'
+        fn = 'at_nn' if kind in PANDAS_SERIES and not positional else 'at'
         return self.read(f'{fn}({self.aref(name)},{idx[0]})?', kind)
 
     def read(self, value, kind):
@@ -1179,7 +1215,7 @@ class Compiler(TextMixin):
                 isinstance(n.value, ast.Attribute)
                 and n.value.attr == 'iloc'
                 and isinstance(n.value.value, ast.Name)
-                and self.types.get(n.value.value.id) in ('series', 'iseries')
+                and self.types.get(n.value.value.id) in PANDAS_SERIES
             ):
                 plain = ast.copy_location(ast.Subscript(value=n.value.value, slice=n.slice, ctx=ast.Load()), n)
                 return self.element(plain, positional=True)
@@ -1460,6 +1496,12 @@ class Compiler(TextMixin):
             if kind not in ('i64', 'f64', 'bool'):
                 self.fail(n, 'np.float32() needs a number')
             return f'(({value}) as f32)', 'f32'
+        if isinstance(func, ast.Attribute) and func.attr == 'bit_count' and not args and not n.keywords:
+            value, kind = self.expr(func.value)
+            if kind not in ('i64', 'bool'):
+                self.fail(n, '.bit_count() is compiled only on int values')
+            # int.bit_count() counts the ones of abs(x).
+            return f'((({value}) as i64).unsigned_abs().count_ones() as i64)', 'i64'
         special = self.ext_call(n)
         if special is not None:
             return special
@@ -1702,7 +1744,7 @@ class Compiler(TextMixin):
             arr, kind = self.array(args[0])
             if ARRAY_INFO[kind][1] != 1:
                 self.fail(n, 'sum() of a 2-D array returns an array; it is not compiled')
-            if kind in ('flist', 'series', 'str', 'bytes'):
+            if kind in ('flist', 'series', 'plseries', 'str', 'bytes'):
                 # Python 3.12+ adds Python floats with extra-precise (Neumaier) summation.
                 self.fail(
                     n,
@@ -2526,6 +2568,8 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
         )
 
     def generate(self):
+        if self.str_series:
+            self.check_series_uses()
         key = (id(self.function), tuple(self.types[p] for p in self.params))
         self.program['stack'].append(self.function)
         self.register('compute', key)
@@ -2588,7 +2632,23 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
             f'static {name}: std::sync::OnceLock<{rust}> = std::sync::OnceLock::new();'
             for name, rust, _ in self.program.get('statics', {}).values()
         )
-        return f"""// Generated by PyRust Engine 0.7.2.
+        fast = ''
+        if self.fast_eligible():
+            # Scalars in, one scalar out: a second entry point that returns the value and the
+            # status together, so a call needs no out-parameter objects on the Python side.
+            value = RUST_TYPE[rt] if rt != 'none' else 'u8'
+            scalar_ffi = ffi[: len(self.params)]
+            fast = f"""#[repr(C)]
+pub struct PyrustFast {{ value: {value}, status: i32 }}
+#[no_mangle]
+pub unsafe extern "C" fn pyrust_fast({', '.join(scalar_ffi)})->PyrustFast{{
+QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {{}})));
+let mut ctx = Ctx{{fuel: {int(self.max_iterations)}u64, cancel: std::ptr::null(), ticks: 0, rng: std::ptr::null_mut(), gauss: std::ptr::null_mut()}};
+let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute({', '.join(calls)})));
+match result {{ Ok(Ok(v)) => PyrustFast{{ value: {'v' if rt != 'none' else '0'}, status: 0 }}, Ok(Err(code)) => PyrustFast{{ value: {ZERO[rt] if rt != 'none' else '0'}, status: code }}, Err(_) => PyrustFast{{ value: {ZERO[rt] if rt != 'none' else '0'}, status: 8 }} }}
+}}
+"""
+        return f"""// Generated by PyRust Engine 0.7.3.
 #![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true,unused_braces,unused_unsafe,non_snake_case,unused_imports)]
 {HELPERS}
 {TEXT_HELPERS}
@@ -2606,7 +2666,44 @@ let status = match result {{ Ok(Ok(v)) => {{ {store} 0 }}, Ok(Err(code)) => code
 if status != 0 {{ {' '.join(rollback)} }}
 status
 }}
-"""
+{fast}"""
+
+    def check_series_uses(self):
+        """Series of str: allow s[i], len(s), loops and builtins that only iterate the values."""
+        parents = {}
+        for parent in ast.walk(self.node):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        iterating = ('len', 'sorted', 'list', 'set', 'min', 'max', 'enumerate', 'zip')
+        for node in ast.walk(self.node):
+            if not (isinstance(node, ast.Name) and node.id in self.str_series and isinstance(node.ctx, ast.Load)):
+                continue
+            parent = parents.get(node)
+            if isinstance(parent, ast.Subscript) and parent.value is node and not isinstance(parent.slice, ast.Slice):
+                continue
+            if isinstance(parent, (ast.For, ast.comprehension)) and parent.iter is node:
+                continue
+            if isinstance(parent, ast.Call) and node in parent.args:
+                func = parent.func
+                if isinstance(func, ast.Name) and func.id in iterating:
+                    continue
+                if isinstance(func, ast.Attribute) and func.attr == 'join':
+                    continue
+            self.fail(
+                node,
+                f'{node.id!r} is a Series of str; only {node.id}[i], len({node.id}), loops over it and '
+                'sorted/list/set/min/max/join of it are compiled (Series operators work element by element)',
+                f'Pass {node.id}.tolist() to use it as a list.',
+            )
+
+    def fast_eligible(self):
+        """True when pyrust_fast is generated: scalar parameters, a number/bool/None result, no random."""
+        return (
+            all(self.types[p] in FAST_KINDS for p in self.params)
+            and resolve(self.return_type) in FAST_RETURNS
+            and not self.program['random']
+            and self.max_iterations < 2**64
+        )
 
     # ---------------------------------------------------------- introspection
     @property
