@@ -9,6 +9,9 @@ from pathlib import Path
 import platform
 import sys
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 here = Path(__file__).resolve().parent
 current = json.loads(Path(sys.argv[1]).read_text())
 system = {'Linux': 'linux', 'Darwin': 'macos', 'Windows': 'windows'}.get(platform.system(), 'linux')
@@ -32,7 +35,7 @@ for row in current['results']:
         print(f'| {name} | new | {now:.2f}x | |')
         continue
     change = now / before - 1
-    flag = ' ⚠️' if change < -0.30 and before > 1.5 else ''
+    flag = ' (slower)' if change < -0.30 and before > 1.5 else ''
     print(f'| {name} | {before:.2f}x | {now:.2f}x | {change:+.0%}{flag} |')
     if flag:
         print(f'::warning::{name} speedup dropped from {before:.2f}x to {now:.2f}x', file=sys.stderr)
