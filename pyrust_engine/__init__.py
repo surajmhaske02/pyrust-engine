@@ -2,9 +2,13 @@ from .cache import prune_cache
 from .compiler import F64Array, F64Array2, I64Array, I64Array2, Unsupported, prange
 from .runtime import OptimizationError, OptimizedFunction, PyRustFallbackWarning, RustToolchainWarning, optimize
 from .toolchain import check_rust, doctor
+from .vectorize import vectorize
+
+optimize.vectorize = vectorize  # type: ignore[attr-defined]  # @optimize.vectorize works too
 
 __all__ = [
     'optimize',
+    'vectorize',
     'prange',
     'OptimizationError',
     'OptimizedFunction',
@@ -19,7 +23,7 @@ __all__ = [
     'I64Array2',
     'prune_cache',
 ]
-__version__ = '0.7.0'
+__version__ = '0.7.1'
 
 
 def load_ipython_extension(ipython):

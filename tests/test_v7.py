@@ -103,7 +103,7 @@ class Compile(unittest.TestCase):
             for i in range(3):
                 total += round(x, 2)
             return total
-        for fn, text in ((uses_print, 'Remove print()'), (uses_list, 'NumPy array'), (rounds, 'round(x) is supported')):
+        for fn, text in ((uses_print, 'Remove print()'), (uses_list, '[0.0] * n'), (rounds, 'round(x) is supported')):
             with self.assertRaises(Unsupported) as ctx:
                 Compiler(fn).generate()
             self.assertIn('hint:', str(ctx.exception))

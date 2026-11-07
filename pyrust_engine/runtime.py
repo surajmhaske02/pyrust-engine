@@ -1,11 +1,13 @@
 """The @optimize decorator: specialization, native dispatch, fallback and metrics."""
 
+import array as _array
 import ast
 import ctypes
 import functools
 import hashlib
 import inspect
 import platform
+import random as _random
 import textwrap
 import threading
 import time
@@ -16,7 +18,16 @@ from typing import Any, Callable, Optional, ParamSpec, Protocol, TypeVar, overlo
 
 from . import prebuilt, toolchain
 from .cache import cache_root, cached_path, compile_library, process_lock
-from .compiler import ARRAY_INFO, KNOWN_BUILTINS, Compiler, Unsupported, default_kinds, kind_of_value, tuple_parts
+from .compiler import (
+    ARRAY_INFO,
+    KNOWN_BUILTINS,
+    LIST_KINDS,
+    Compiler,
+    Unsupported,
+    default_kinds,
+    kind_of_value,
+    tuple_parts,
+)
 from .toolchain import ToolchainError
 
 _STATUS = {
@@ -38,10 +49,18 @@ _TYPE_NAMES = {
     'iarray': 'I64Array',
     'array2': 'F64Array2',
     'iarray2': 'I64Array2',
+    'flist': 'list[float]',
+    'ilist': 'list[int]',
+    'series': 'pandas.Series[float64]',
+    'iseries': 'pandas.Series[int64]',
+    'str': 'str',
+    'bytes': 'bytes',
+    'char': 'str (one character)',
     'none': 'None',
 }
-_CTYPE = {'i64': ctypes.c_int64, 'f64': ctypes.c_double, 'bool': ctypes.c_bool}
+_CTYPE = {'i64': ctypes.c_int64, 'f64': ctypes.c_double, 'bool': ctypes.c_bool, 'char': ctypes.c_uint32}
 _ELEMENT_CTYPE = {'f64': ctypes.c_double, 'i64': ctypes.c_int64}
+_LIST_TYPECODE = {'flist': 'd', 'ilist': 'q'}
 _NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64'}
 FAST_BUDGET = 50_000_000  # iterations run inline; longer calls move to an interruptible thread
 UNLIMITED = 2**64 - 1
@@ -240,6 +259,7 @@ class _Native:
         'free',
         'has_arrays',
         'any_written',
+        'random',
     )
 
     def __init__(self, lib, description):
@@ -251,6 +271,7 @@ class _Native:
         self.written = tuple(p in description.written for p in description.params)
         self.any_written = any(self.written)
         self.has_arrays = any(k in ARRAY_INFO for k in self.kinds)
+        self.random = description.program['random']
         self.returns = description.return_type
         argtypes = []
         for kind in self.kinds:
@@ -274,6 +295,8 @@ class _Native:
             self.out_types = (_CTYPE[rt],)
         argtypes += [ctypes.POINTER(t) for t in self.out_types]
         argtypes += [ctypes.c_uint64, ctypes.c_void_p]
+        if self.random:
+            argtypes += [ctypes.c_void_p, ctypes.c_void_p]
         self.entry.argtypes = argtypes
         self.entry.restype = ctypes.c_int32
 
@@ -281,6 +304,14 @@ class _Native:
         rt = self.returns
         if rt == 'none':
             return None
+        if rt in LIST_KINDS:
+            element = ARRAY_INFO[rt][0]
+            ptr, n, _, _ = (o.value for o in outs)
+            n = n or 0
+            try:
+                return (_ELEMENT_CTYPE[element] * n).from_address(ptr)[:] if n else []
+            finally:
+                self.free(ptr, n)
         if rt in ARRAY_INFO:
             import numpy as np
 
@@ -298,7 +329,40 @@ class _Native:
             return data.reshape((rows or 0, cols or 0)) if dims == 2 else data
         if tuple_parts(rt):
             return tuple(o.value for o in outs)
+        if rt == 'char':
+            return chr(outs[0].value)
         return outs[0].value
+
+
+class _RandomState:
+    """Python's shared random generator state, lent to one native call.
+
+    Native code continues the exact Mersenne Twister sequence of the random module;
+    the new state is written back only when the call succeeds, so a replay in Python
+    starts from the same state.
+    """
+
+    __slots__ = ('state', 'words', 'gauss', 'pointers')
+
+    def __init__(self):
+        state = _random._inst.getstate()
+        if state[0] != 3 or len(state[1]) != 625:
+            raise Unsupported('unexpected random module state format')
+        self.state = state
+        self.words = (ctypes.c_uint32 * 625)(*state[1])
+        self.gauss = (ctypes.c_double * 2)()
+        self.restart()
+
+    def restart(self):
+        self.words[:] = self.state[1]
+        gauss_next = self.state[2]
+        self.gauss[0] = 0.0 if gauss_next is None else gauss_next
+        self.gauss[1] = 0.0 if gauss_next is None else 1.0
+        self.pointers = (ctypes.addressof(self.words), ctypes.addressof(self.gauss))
+        return self.pointers
+
+    def publish(self):
+        _random._inst.setstate((3, tuple(self.words), self.gauss[0] if self.gauss[1] else None))
 
 
 class _Failure:
@@ -320,6 +384,11 @@ def _unsupported_value(value):
             f'expected a float64 or int64 NumPy array with 1 or 2 dimensions '
             f'(got {type(value).__name__} of {value.dtype}, {value.ndim}-D)'
         )
+    if type(value) is list:
+        return 'list elements must be all floats or all 64-bit ints'
+    pd = sys.modules.get('pandas')
+    if pd is not None and isinstance(value, pd.Series):
+        return 'pandas Series must have a float64 or int64 dtype and the default 0..n-1 index (use .reset_index(drop=True))'
     return f'{type(value).__name__} values are not compiled'
 
 
@@ -613,10 +682,43 @@ class _Optimized:
 
     # ------------------------------------------------------------------- call
     def convert(self, values, native):
+        """Native arguments, plus objects to keep alive and lists to copy back after success."""
         args = []
+        keep = []
+        copies = []
+        lists = []
         ranges = [] if native.any_written else None
         for name, kind, value, writes in zip(self.signature.parameters, native.kinds, values, native.written):
-            if kind in ARRAY_INFO:
+            if kind in LIST_KINDS:
+                # Lists are copied into a typed buffer; written lists get the new values back.
+                if any(other is value and (writes or other_writes) for other, other_writes in lists):
+                    raise Unsupported(f'{name}: the same list is passed twice and written')
+                lists.append((value, writes))
+                buffer = _array.array(_LIST_TYPECODE[kind], value)
+                address, count = buffer.buffer_info()
+                args += [address, count, 1]
+                keep.append(buffer)
+                if writes:
+                    copies.append((value, buffer))
+            elif kind in ('series', 'iseries'):
+                data = value.to_numpy()
+                flags = data.flags
+                if not (data.dtype.isnative and flags.c_contiguous and flags.aligned):
+                    import numpy as np
+
+                    data = np.ascontiguousarray(data)  # read-only, so a copy is fine
+                address = data.ctypes.data
+                args += [address, data.shape[0], 1]
+                keep.append(data)
+                if ranges is not None and data.size:
+                    ranges.append((address, address + data.nbytes, False))
+            elif kind == 'str':
+                raw = value.encode('utf-32-le', 'surrogatepass')
+                args += [ctypes.cast(ctypes.c_char_p(raw), ctypes.c_void_p).value, len(value), 1]
+                keep.append(raw)
+            elif kind == 'bytes':
+                args += [ctypes.cast(ctypes.c_char_p(value), ctypes.c_void_p).value, len(value), 1]
+            elif kind in ARRAY_INFO:
                 flags = value.flags
                 if not (value.dtype.isnative and flags.c_contiguous and flags.aligned):
                     raise Unsupported(
@@ -640,16 +742,17 @@ class _Optimized:
                 for b0, b1, wb in ranges[i + 1 :]:
                     if (wa or wb) and a0 < b1 and b0 < a1:
                         raise Unsupported('array arguments share memory with an array that is written')
-        return args
+        return args, keep, copies
 
-    def run_long(self, native, args, refs):
+    def run_long(self, native, args, refs, rng):
         """Re-run a call that exceeded the inline budget in a thread, with no budget and
         Ctrl-C support (the native loop checks a cancel flag)."""
         flag = ctypes.c_uint8(0)
         result = {}
+        extra = rng.restart() if rng is not None else ()
 
         def runner():
-            result['status'] = native.entry(*args, *refs, UNLIMITED, ctypes.addressof(flag))
+            result['status'] = native.entry(*args, *refs, UNLIMITED, ctypes.addressof(flag), *extra)
 
         thread = threading.Thread(target=runner, name='pyrust-long-call', daemon=True)
         thread.start()
@@ -718,19 +821,31 @@ class _Optimized:
                 for callee, code, defaults in native.code_guards:
                     if callee.__code__ is not code or callee.__defaults__ is not defaults:
                         return python_call(f'code of called function {callee.__qualname__} changed', args, kwargs)
+                copies = None
                 if native.has_arrays:
                     try:
-                        native_args = self.convert(values, native)
+                        native_args, keep, copies = self.convert(values, native)
                     except Unsupported as exc:
                         return python_call(str(exc), args, kwargs)
                 else:
                     native_args = values
                 outs = [t() for t in native.out_types]
                 refs = [byref(o) for o in outs]
+                rng = None
+                extra = ()
+                if native.random:
+                    try:
+                        rng = _RandomState()
+                    except Unsupported as exc:
+                        return python_call(str(exc), args, kwargs)
+                    extra = rng.pointers
                 t0 = perf_counter() if timing else 0.0
-                status = native.entry(*native_args, *refs, budget, None)
+                status = native.entry(*native_args, *refs, budget, None, *extra)
                 if status == 4 and not strict_budget:
-                    status = self.run_long(native, native_args, refs)
+                    if copies:  # lists are not undone natively: start again from the originals
+                        for target, buffer in copies:
+                            buffer[:] = _array.array(buffer.typecode, target)
+                    status = self.run_long(native, native_args, refs, rng)
                 elapsed = perf_counter() - t0 if timing else 0.0
                 if status:
                     with metrics_lock:
@@ -740,6 +855,11 @@ class _Optimized:
                         raise KeyboardInterrupt
                     return python_call(_STATUS.get(status, 'unknown native guard failure'), args, kwargs)
                 native_elapsed = elapsed
+                if copies:
+                    for target, buffer in copies:
+                        target[:] = buffer.tolist()
+                if rng is not None:
+                    rng.publish()
                 return native.result(outs)
             finally:
                 with metrics_lock:

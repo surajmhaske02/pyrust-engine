@@ -7,6 +7,9 @@ Kinds used for values:
   'i64' int, 'f64' float, 'bool' bool,
   'array' / 'iarray' 1-D float64 / int64 NumPy arrays,
   'array2' / 'iarray2' 2-D float64 / int64 NumPy arrays,
+  'flist' / 'ilist' Python lists of floats / ints (copied in, copied back after writes),
+  'series' / 'iseries' pandas Series of float64 / int64 with a default 0..n-1 index (read-only),
+  'str' strings (read-only; elements are 'char', one character) and 'bytes' (read-only; elements are ints),
   'tuple(k1,k2,...)' tuples of scalars (return values and unpacking only),
   'none' for functions that return None.
 """
@@ -15,6 +18,7 @@ import ast
 import builtins
 import inspect
 import math
+import random as _random
 import sys
 import textwrap
 import types
@@ -53,11 +57,30 @@ def prange(*args):
     return range(*args)
 
 
-ARRAY_INFO = {'array': ('f64', 1), 'iarray': ('i64', 1), 'array2': ('f64', 2), 'iarray2': ('i64', 2)}
+# Every sequence kind is passed to Rust as (pointer, rows, cols) and read through Arr<T>.
+ARRAY_INFO = {
+    'array': ('f64', 1),
+    'iarray': ('i64', 1),
+    'array2': ('f64', 2),
+    'iarray2': ('i64', 2),
+    'flist': ('f64', 1),
+    'ilist': ('i64', 1),
+    'series': ('f64', 1),
+    'iseries': ('i64', 1),
+    'str': ('u32', 1),
+    'bytes': ('u8', 1),
+}
 ARRAY_KINDS = tuple(ARRAY_INFO)
+NUMPY_KINDS = ('array', 'iarray', 'array2', 'iarray2')
+LIST_KINDS = ('flist', 'ilist')
+READ_ONLY_KINDS = ('series', 'iseries', 'str', 'bytes')
 ELEMENT = {k: v[0] for k, v in ARRAY_INFO.items()}
+# What reading one element gives: str elements are one-character strings, bytes elements are ints.
+READ_KIND = {'f64': 'f64', 'i64': 'i64', 'u32': 'char', 'u8': 'i64'}
 SCALARS = ('i64', 'f64', 'bool')
-RUST_TYPE = {'i64': 'i64', 'f64': 'f64', 'bool': 'bool', 'none': '()'}
+VALUES = ('i64', 'f64', 'bool', 'char')  # scalars plus single characters
+RUST_TYPE = {'i64': 'i64', 'f64': 'f64', 'bool': 'bool', 'char': 'u32', 'none': '()'}
+ZERO = {'i64': '0', 'f64': '0.0', 'bool': 'false', 'char': '0'}
 ANNOTATIONS = {
     int: 'i64',
     'int': 'i64',
@@ -73,6 +96,16 @@ ANNOTATIONS = {
     'F64Array2': 'array2',
     I64Array2: 'iarray2',
     'I64Array2': 'iarray2',
+    str: 'str',
+    'str': 'str',
+    bytes: 'bytes',
+    'bytes': 'bytes',
+    list: 'flist',
+    'list': 'flist',
+    list[float]: 'flist',
+    'list[float]': 'flist',
+    list[int]: 'ilist',
+    'list[int]': 'ilist',
 }
 RETURN_ANNOTATIONS = {
     int: 'i64',
@@ -83,6 +116,8 @@ RETURN_ANNOTATIONS = {
     'bool': 'bool',
     None: 'none',
     'None': 'none',
+    str: 'char',
+    'str': 'char',
 }
 MAX_DEPTH = 300  # native call depth; deeper recursion replays in Python (keeps thread stacks safe)
 PARALLEL_MIN = 4096  # prange loops shorter than this run on one core
@@ -95,7 +130,8 @@ PARALLEL_MIN = 4096  # prange loops shorter than this run on one core
 #   7 interrupted (Ctrl-C)      8 internal error (Rust panic), replayed in Python
 HELPERS = r"""
 use std::sync::atomic::{AtomicU8, Ordering};
-pub struct Ctx { fuel: u64, cancel: *const AtomicU8, ticks: u32 }
+// rng: Python's Mersenne Twister state (624 words + position), gauss: [gauss_next, has_gauss_next].
+pub struct Ctx { fuel: u64, cancel: *const AtomicU8, ticks: u32, rng: *mut u32, gauss: *mut f64 }
 fn tick(c:&mut Ctx)->Result<(),i32>{
     if c.fuel==0 {return Err(4)}
     c.fuel-=1;
@@ -161,6 +197,87 @@ fn at2<T:Copy>(a:&Arr<T>,i:i64,k:i64)->Result<T,i32>{
     let r=index(a.rows,i)?; let c=index(a.cols,k)?; Ok(unsafe{*a.ptr.add(r*a.cols+c)})
 }
 fn put<T:Copy>(a:&mut Arr<T>,i:i64,v:T)->Result<(),i32>{let j=index(a.len,i)?; a.write(j,v); Ok(())}
+// pandas Series s[i] looks up the label i: negative numbers are not positions there.
+fn at_nn<T:Copy>(a:&Arr<T>,i:i64)->Result<T,i32>{if i<0 {return Err(3)} at(a,i)}
+fn has<T:Copy+PartialEq>(a:&Arr<T>,x:T)->bool{
+    for j in 0..a.len {if unsafe{*a.ptr.add(j)}==x {return true}}
+    false
+}
+// One-character str methods: exact for ASCII, anything else replays in Python.
+fn ascii(c:u32)->Result<u8,i32>{if c<128 {Ok(c as u8)} else {Err(6)}}
+fn c_isdigit(c:u32)->Result<bool,i32>{Ok(ascii(c)?.is_ascii_digit())}
+fn c_isalpha(c:u32)->Result<bool,i32>{Ok(ascii(c)?.is_ascii_alphabetic())}
+fn c_isalnum(c:u32)->Result<bool,i32>{Ok(ascii(c)?.is_ascii_alphanumeric())}
+fn c_isspace(c:u32)->Result<bool,i32>{let b=ascii(c)?; Ok(b==b' ' || (9..=13).contains(&b) || (28..=31).contains(&b))}
+fn c_isupper(c:u32)->Result<bool,i32>{Ok(ascii(c)?.is_ascii_uppercase())}
+fn c_islower(c:u32)->Result<bool,i32>{Ok(ascii(c)?.is_ascii_lowercase())}
+fn c_lower(c:u32)->Result<u32,i32>{Ok(ascii(c)?.to_ascii_lowercase() as u32)}
+fn c_upper(c:u32)->Result<u32,i32>{Ok(ascii(c)?.to_ascii_uppercase() as u32)}
+fn to_char(i:i64)->Result<u32,i32>{if (0..=0x10FFFF).contains(&i) {Ok(i as u32)} else {Err(6)}}
+// CPython's random module (_randommodule.c and random.py), bit for bit.
+fn mt_next(c:&mut Ctx)->Result<u32,i32>{
+    if c.rng.is_null() {return Err(6)}
+    let mt=unsafe{std::slice::from_raw_parts_mut(c.rng,625)};
+    let mut pos=mt[624] as usize;
+    if pos>=624 {
+        const N:usize=624; const M:usize=397;
+        for k in 0..N {
+            let y=(mt[k]&0x80000000)|(mt[(k+1)%N]&0x7fffffff);
+            let mut v=mt[(k+M)%N]^(y>>1);
+            if y&1!=0 {v^=0x9908b0df;}
+            mt[k]=v;
+        }
+        pos=0;
+    }
+    let mut y=mt[pos];
+    mt[624]=(pos+1) as u32;
+    y^=y>>11; y^=(y<<7)&0x9d2c5680; y^=(y<<15)&0xefc60000; y^=y>>18;
+    Ok(y)
+}
+fn rnd_random(c:&mut Ctx)->Result<f64,i32>{
+    let a=(mt_next(c)?>>5) as f64; let b=(mt_next(c)?>>6) as f64;
+    Ok((a*67108864.0+b)*(1.0/9007199254740992.0))
+}
+fn rnd_bits(c:&mut Ctx,k:u32)->Result<i64,i32>{
+    if k==0 {return Ok(0)}
+    if k<=32 {return Ok((mt_next(c)?>>(32-k)) as i64)}
+    if k>63 {return Err(6)}
+    let mut r:u64=0; let mut left=k as i64; let mut word=0;
+    while left>0 {
+        let mut w=mt_next(c)?;
+        if left<32 {w>>=32-left;}
+        r|=(w as u64)<<(32*word);
+        word+=1; left-=32;
+    }
+    Ok(r as i64)
+}
+fn rnd_below(c:&mut Ctx,n:i64)->Result<i64,i32>{
+    if n<=0 {return Err(6)}
+    let k=64-(n as u64).leading_zeros();
+    let mut r=rnd_bits(c,k)?;
+    while r>=n {r=rnd_bits(c,k)?;}
+    Ok(r)
+}
+fn rnd_range(c:&mut Ctx,start:i64,stop:i64)->Result<i64,i32>{
+    let width=stop.checked_sub(start).ok_or(1)?;
+    if width<=0 {return Err(6)}
+    Ok(start+rnd_below(c,width)?)
+}
+fn rnd_gauss(c:&mut Ctx,mu:f64,sigma:f64)->Result<f64,i32>{
+    let g=c.gauss;
+    if g.is_null() {return Err(6)}
+    let z;
+    if unsafe{*g.add(1)}!=0.0 {
+        z=unsafe{*g};
+        unsafe{*g=0.0; *g.add(1)=0.0;}
+    } else {
+        let x2pi=rnd_random(c)?*(2.0*std::f64::consts::PI);
+        let g2rad=(-2.0*(1.0-rnd_random(c)?).ln()).sqrt();
+        z=x2pi.cos()*g2rad;
+        unsafe{*g=x2pi.sin()*g2rad; *g.add(1)=1.0;}
+    }
+    Ok(mu+z*sigma)
+}
 // Parallel loops write distinct elements of a snapshotted array through a shared view.
 unsafe impl<T:Copy> Sync for Arr<T> {}
 unsafe impl<T:Copy> Send for Arr<T> {}
@@ -349,20 +466,38 @@ KNOWN_BUILTINS = {
     'divmod',
     'enumerate',
     'bool',
+    'ord',
+    'chr',
 }
 NUMPY_MAKERS = {'zeros': 0, 'empty': 0, 'ones': 1, 'zeros_like': 0, 'empty_like': 0, 'ones_like': 1}
+# random module functions reproduced exactly (same Mersenne Twister state as Python's random).
+RANDOM_FUNCS = ('random', 'uniform', 'randint', 'randrange', 'gauss', 'choice')
+# One-character str methods, exact for ASCII; other characters replay in Python.
+CHAR_TESTS = {
+    'isdigit': 'c_isdigit',
+    'isalpha': 'c_isalpha',
+    'isalnum': 'c_isalnum',
+    'isspace': 'c_isspace',
+    'isupper': 'c_isupper',
+    'islower': 'c_islower',
+}
+CHAR_MAPS = {'lower': 'c_lower', 'upper': 'c_upper'}
 
 HINTS = [
     (
         'List',
-        "Lists aren't compiled. Pass a NumPy array (F64Array / I64Array), create one with np.zeros(n), "
-        'or use separate variables.',
+        'List literals are compiled only as [value] * n. Pass lists of numbers as arguments, '
+        'or create one with [0.0] * n and fill it in a loop.',
     ),
-    ('ListComp', "List comprehensions aren't compiled. Write a loop that fills an array from np.zeros(n)."),
+    ('ListComp', "List comprehensions aren't compiled. Write a loop that fills a list made with [0.0] * n."),
     ('GeneratorExp', "Generator expressions aren't compiled. Write a loop that adds to a total."),
     ('Dict', "Dicts aren't compiled. Move dict work outside the decorated function."),
     ('Set', "Sets aren't compiled. Move set work outside the decorated function."),
-    ('JoinedStr', "Strings aren't compiled. Format text outside the decorated function."),
+    (
+        'JoinedStr',
+        'Building or formatting strings is not compiled. Strings can be read: len(s), s[i], for ch in s, '
+        "ch == 'a', ch in 'aeiou', ord(ch), ch.isdigit().",
+    ),
     ('Lambda', "Lambdas aren't compiled. Use a plain module-level function instead."),
     ('With', "`with` blocks aren't compiled. Keep I/O and context managers outside the decorated function."),
     ('Try', "`try` blocks aren't compiled. Errors in compiled code replay in Python, so handle them in the caller."),
@@ -403,12 +538,48 @@ def kind_of_value(value):
         return 'f64'
     if t is bool:
         return 'bool'
+    if t is str:
+        return 'str'
+    if t is bytes:
+        return 'bytes'
+    if t is list:
+        return list_kind(value)
     np = sys.modules.get('numpy')
     if np is not None and t is np.ndarray and value.ndim in (1, 2):
         if value.dtype == np.float64:
             return 'array' if value.ndim == 1 else 'array2'
         if value.dtype == np.int64:
             return 'iarray' if value.ndim == 1 else 'iarray2'
+        return None
+    return series_kind(value)
+
+
+def list_kind(value):
+    """'flist' for a list of floats, 'ilist' for a list of 64-bit ints, else None."""
+    element_types = set(map(type, value))
+    if not element_types or element_types == {float}:
+        return 'flist'
+    if element_types == {int} and min(value) >= -(2**63) and max(value) < 2**63:
+        return 'ilist'
+    return None
+
+
+def series_kind(value):
+    """'series' / 'iseries' for a NumPy-backed float64 / int64 pandas Series with index 0..n-1."""
+    pd = sys.modules.get('pandas')
+    np = sys.modules.get('numpy')
+    if pd is None or np is None or not isinstance(value, pd.Series):
+        return None
+    index = value.index
+    if type(index) is not pd.RangeIndex or index.start != 0 or index.step != 1:
+        return None
+    dtype = value.dtype
+    if not isinstance(dtype, np.dtype):  # nullable and other extension dtypes
+        return None
+    if dtype == np.float64:
+        return 'series'
+    if dtype == np.int64:
+        return 'iseries'
     return None
 
 
@@ -419,13 +590,21 @@ def default_kinds(function):
         annotation = p.annotation
         if annotation is inspect.Parameter.empty:
             kinds[name] = 'i64'
+        elif (
+            getattr(annotation, '__module__', '').startswith('pandas')
+            and getattr(annotation, '__name__', '') == 'Series'
+        ):
+            kinds[name] = 'series'
+        elif annotation == 'pd.Series' or annotation == 'pandas.Series':
+            kinds[name] = 'series'
         else:
             try:
                 kinds[name] = ANNOTATIONS[annotation]
             except (KeyError, TypeError):
                 raise Unsupported(
                     f'{function.__name__}: unsupported annotation for {name}: {annotation!r} '
-                    '(use int, float, bool, F64Array, I64Array, F64Array2 or I64Array2)'
+                    '(use int, float, bool, str, bytes, list[float], list[int], pandas.Series, '
+                    'F64Array, I64Array, F64Array2 or I64Array2)'
                 ) from None
     return kinds
 
@@ -503,6 +682,7 @@ class Compiler:
                 'recursive': {},
                 'next': 0,
                 'parallel': False,
+                'random': False,
             }
         )
 
@@ -619,7 +799,13 @@ class Compiler:
         """(name, kind) of an array parameter or local array."""
         if isinstance(node, ast.Name) and node.id in self.assigned and self.types.get(node.id) in ARRAY_KINDS:
             return node.id, self.types[node.id]
-        self.fail(node, 'expected a NumPy array parameter or a local array from np.zeros(...)')
+        if isinstance(node, ast.List):
+            self.fail(node, 'list literals are not compiled here')  # the List hint explains [value] * n
+        self.fail(
+            node,
+            'expected an array, list, str, bytes or pandas Series argument, or a local array or list',
+            'Create local arrays with np.zeros(n) and local lists with [0.0] * n.',
+        )
 
     def aref(self, name):
         if self.parallel is not None and name in self.parallel['arrays']:
@@ -627,6 +813,7 @@ class Compiler:
         return f'&*{self.name(name)}' if name in self.params else f'&{self.name(name)}'
 
     def amut(self, name, node):
+        self.check_writable(name, node)
         if self.parallel is not None:
             self.fail(
                 node,
@@ -638,6 +825,16 @@ class Compiler:
                 self.written.add(name)
             return f'&mut *{self.name(name)}'
         return f'&mut {self.name(name)}'
+
+    def check_writable(self, name, node):
+        kind = self.types.get(name)
+        if kind in READ_ONLY_KINDS:
+            what = {'series': 'pandas Series', 'iseries': 'pandas Series', 'str': 'str', 'bytes': 'bytes'}[kind]
+            self.fail(
+                node,
+                f'{name!r} is a {what}, which compiled code can only read',
+                'Write results into a NumPy array (np.zeros(n)) or a list ([0.0] * n) instead.',
+            )
 
     def indices(self, sub):
         """(array name, kind, [index exprs]) for a[i], a[i, j] or a[i][j]."""
@@ -677,10 +874,34 @@ class Compiler:
                 'Other iterations run at the same time, so reading their elements would not match Python.',
             )
 
-    def element(self, sub):
+    def element(self, sub, positional=False):
         name, kind, idx = self.indices(sub)
-        fn = 'at' if len(idx) == 1 else 'at2'
-        return f'{fn}({self.aref(name)},{",".join(idx)})?', ELEMENT[kind]
+        if len(idx) == 2:
+            return f'at2({self.aref(name)},{",".join(idx)})?', READ_KIND[ELEMENT[kind]]
+        # s[i] on a Series looks up the label i (index 0..n-1); s.iloc[i] is positional.
+        fn = 'at_nn' if kind in ('series', 'iseries') and not positional else 'at'
+        return self.read(f'{fn}({self.aref(name)},{idx[0]})?', kind)
+
+    def read(self, value, kind):
+        """An element read from a sequence of this kind, as (rust, value kind)."""
+        element = ELEMENT[kind]
+        if element == 'u8':
+            return f'({value} as i64)', 'i64'
+        return value, READ_KIND[element]
+
+    def list_repeat(self, n):
+        """[value] * n or n * [value]: a new list of ints or floats."""
+        listed, count = (n.left, n.right) if isinstance(n.left, ast.List) else (n.right, n.left)
+        if isinstance(count, ast.List) or len(listed.elts) != 1:
+            self.fail(n, 'only [value] * n lists are compiled', 'Write [0.0] * n, then fill it in a loop.')
+        fill, kind = self.expr(listed.elts[0])
+        if kind not in ('i64', 'f64'):
+            self.fail(n, 'lists made with [value] * n must hold ints or floats')
+        size = self.expect(count, 'i64')
+        if self.parallel is not None:
+            self.fail(n, 'lists cannot be created inside prange', 'Create them before the loop.')
+        element_kind = 'flist' if kind == 'f64' else 'ilist'
+        return f'Arr::<{kind}>::owned({size},1i64,{fill})?', element_kind
 
     def shape(self, node):
         """a.shape -> tuple kind value."""
@@ -715,6 +936,8 @@ class Compiler:
             self.fail(n, f'np.{attr} takes one shape argument here')
         if attr.endswith('_like'):
             name, kind = self.array(n.args[0])
+            if kind not in NUMPY_KINDS + LIST_KINDS:
+                self.fail(n, f'np.{attr}() needs a NumPy array or a list of numbers')
             element = dtype or ELEMENT[kind]
             ref = self.aref(name)
             rows, cols = f'(({ref}).rows as i64)', f'(({ref}).cols as i64)'
@@ -744,7 +967,9 @@ class Compiler:
                 return f'({n.value}i64)', 'i64'
             if type(n.value) is float and math.isfinite(n.value):
                 return float_literal(n.value), 'f64'
-            self.fail(n, 'only int, float and bool constants are supported')
+            if type(n.value) is str and len(n.value) == 1:
+                return f'({ord(n.value)}u32)', 'char'
+            self.fail(n, 'only int, float, bool and one-character str constants are supported')
         if isinstance(n, ast.Name):
             if self.parallel is not None and n.id in self.parallel['reductions']:
                 self.fail(n, f'inside prange, the total {n.id!r} can only be added to, not read')
@@ -787,6 +1012,14 @@ class Compiler:
                 if not -len(parts) <= i < len(parts):
                     self.fail(n, 'shape index out of range')
                 return f'({value}.{i % len(parts)})', 'i64'
+            if (
+                isinstance(n.value, ast.Attribute)
+                and n.value.attr == 'iloc'
+                and isinstance(n.value.value, ast.Name)
+                and self.types.get(n.value.value.id) in ('series', 'iseries')
+            ):
+                plain = ast.copy_location(ast.Subscript(value=n.value.value, slice=n.slice, ctx=ast.Load()), n)
+                return self.element(plain, positional=True)
             return self.element(n)
         if isinstance(n, ast.UnaryOp):
             if isinstance(n.op, ast.Not):
@@ -805,6 +1038,8 @@ class Compiler:
             if isinstance(n.op, ast.Invert):
                 return f'(!({self.expect(n.operand, "i64")}))', 'i64'
         if isinstance(n, ast.BinOp):
+            if isinstance(n.op, ast.Mult) and (isinstance(n.left, ast.List) or isinstance(n.right, ast.List)):
+                return self.list_repeat(n)
             return self.binop(n, n.left, n.op, n.right)
         if isinstance(n, ast.Compare):
             return f'({self.condition(n)})', 'bool'
@@ -822,7 +1057,7 @@ class Compiler:
             cond = self.condition(n.test)
             a, ta = self.expr(n.body)
             b, tb = self.expr(n.orelse)
-            if ta != tb or ta not in SCALARS:
+            if ta != tb or ta not in VALUES:
                 self.fail(
                     n,
                     'both branches of `x if c else y` must have the same type',
@@ -920,6 +1155,22 @@ class Compiler:
         math_attr = self.math_name(func)
         if math_attr is not None:
             return self.math_call(n, math_attr, args)
+        random_attr = self.random_name(func)
+        if random_attr is not None:
+            if n.keywords:
+                self.fail(n, 'pass the arguments of random functions by position')
+            return self.random_call(n, random_attr, args)
+        if isinstance(func, ast.Attribute) and (func.attr in CHAR_TESTS or func.attr in CHAR_MAPS):
+            value, kind = self.expr(func.value)
+            if kind != 'char' or args:
+                self.fail(
+                    n,
+                    f'.{func.attr}() is compiled only on one character, like s[i].{func.attr}()',
+                    'Loop over the string and test each character.',
+                )
+            if func.attr in CHAR_TESTS:
+                return f'{CHAR_TESTS[func.attr]}({value})?', 'bool'
+            return f'{CHAR_MAPS[func.attr]}({value})?', 'char'
         if not isinstance(func, ast.Name):
             self.fail(
                 n,
@@ -941,6 +1192,100 @@ class Compiler:
         if callee is not None:
             return self.user_call(n, name, callee)
         self.fail(n, f'call to {name!r} is unsupported')
+
+    def random_name(self, func):
+        """'randint' for random.randint(...) or a `from random import randint` name; else None.
+
+        Only the functions of Python's shared random generator are recognised, so the
+        compiled code can continue exactly the same random sequence.
+        """
+        module = _random
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id not in self.local_names
+            and self.lookup(func.value.id) is module
+            and func.attr in RANDOM_FUNCS
+        ):
+            self.guard(func.value.id, module)
+            attr = func.attr
+        elif isinstance(func, ast.Name) and func.id not in self.local_names:
+            obj = self.lookup(func.id)
+            attr = next((a for a in RANDOM_FUNCS if getattr(module, a, None) is obj), None)
+            if attr is None:
+                return None
+            self.guard(func.id, obj)
+        else:
+            return None
+        current = getattr(module, attr, None)
+        if getattr(current, '__self__', None) is not getattr(module, '_inst', object()):
+            return None  # random.<attr> was replaced by something else
+        # Replacing random.<attr> later sends calls back to Python.
+        self.program['guards'][(id(module.__dict__), attr)] = (module.__dict__, {}, attr, current)
+        return attr
+
+    def random_call(self, n, attr, args):
+        if self.parallel is not None:
+            self.fail(
+                n,
+                'random numbers are not compiled inside prange',
+                'Python draws them in order, one after another; use a normal range loop.',
+            )
+        self.program['random'] = True
+        count = len(args)
+        if attr == 'random' and count == 0:
+            return 'rnd_random(fuel)?', 'f64'
+        if attr == 'uniform' and count == 2:
+            a, ta = self.scalar(args[0])
+            b, tb = self.scalar(args[1])
+            t = self.temp('r')
+            if ta == tb == 'i64':
+                # a + (b - a) * random(): the int difference is converted to float once.
+                return (
+                    f'({{ let {t}a: i64 = {a}; let {t}b: i64 = {b}; let {t}d = ({t}b).checked_sub({t}a).ok_or(1)?; '
+                    f'({t}a as f64) + ({t}d as f64) * rnd_random(fuel)? }})'
+                ), 'f64'
+            a = f'({a} as f64)' if ta == 'i64' else a
+            b = f'({b} as f64)' if tb == 'i64' else b
+            return f'({{ let {t}a: f64 = {a}; let {t}b: f64 = {b}; {t}a + ({t}b - {t}a) * rnd_random(fuel)? }})', 'f64'
+        if attr == 'randint' and count == 2:
+            a, b = self.expect(args[0], 'i64'), self.expect(args[1], 'i64')
+            t = self.temp('r')
+            return (
+                f'({{ let {t}a: i64 = {a}; let {t}b: i64 = {b}; '
+                f'rnd_range(fuel,{t}a,({t}b).checked_add(1).ok_or(1)?)? }})'
+            ), 'i64'
+        if attr == 'randrange' and count == 1:
+            return f'rnd_below(fuel,{self.expect(args[0], "i64")})?', 'i64'
+        if attr == 'randrange' and count == 2:
+            a, b = self.expect(args[0], 'i64'), self.expect(args[1], 'i64')
+            t = self.temp('r')
+            return f'({{ let {t}a: i64 = {a}; let {t}b: i64 = {b}; rnd_range(fuel,{t}a,{t}b)? }})', 'i64'
+        if attr == 'gauss' and count == 2:
+            mu, sigma = self.as_float(args[0]), self.as_float(args[1])
+            t = self.temp('r')
+            return f'({{ let {t}m: f64 = {mu}; let {t}s: f64 = {sigma}; rnd_gauss(fuel,{t}m,{t}s)? }})', 'f64'
+        if attr == 'choice' and count == 1:
+            name, kind = self.array(args[0])
+            if ARRAY_INFO[kind][1] != 1:
+                self.fail(n, 'random.choice() of a 2-D array picks a row; it is not compiled')
+            ref = self.aref(name)
+            t = self.temp('r')
+            # Python reads seq[i] for a random i; for a Series that is the label i, which is position i here.
+            return self.read(
+                f'({{ let {t}n = ({ref}).len as i64; if {t}n == 0 {{ return Err(3) }} '
+                f'at({ref}, rnd_below(fuel,{t}n)?)? }})',
+                kind,
+            )
+        forms = {
+            'random': 'random.random()',
+            'uniform': 'random.uniform(a, b)',
+            'randint': 'random.randint(a, b)',
+            'randrange': 'random.randrange(stop) or random.randrange(start, stop)',
+            'gauss': 'random.gauss(mu, sigma)',
+            'choice': 'random.choice(seq)',
+        }
+        self.fail(n, f'only {forms[attr]} is compiled')
 
     def math_call(self, n, attr, args):
         if attr == 'hypot':
@@ -985,6 +1330,13 @@ class Compiler:
             return f'(({self.aref(arr)}).rows as i64)', 'i64'
         if name == 'float' and len(args) == 1:
             return self.as_float(args[0]), 'f64'
+        if name == 'ord' and len(args) == 1:
+            value, kind = self.expr(args[0])
+            if kind != 'char':
+                self.fail(n, 'ord() needs one character, like ord(s[i])')
+            return f'({value} as i64)', 'i64'
+        if name == 'chr' and len(args) == 1:
+            return f'to_char({self.expect(args[0], "i64")})?', 'char'
         if name == 'int' and len(args) == 1:
             value, kind = self.scalar(args[0])
             return (f'({value})', 'i64') if kind == 'i64' else (f'to_int({value})?', 'i64')
@@ -1029,6 +1381,13 @@ class Compiler:
             arr, kind = self.array(args[0])
             if ARRAY_INFO[kind][1] != 1:
                 self.fail(n, 'sum() of a 2-D array returns an array; it is not compiled')
+            if kind in ('flist', 'series', 'str', 'bytes'):
+                # Python 3.12+ adds Python floats with extra-precise (Neumaier) summation.
+                self.fail(
+                    n,
+                    f'sum() of this {kind} is not compiled',
+                    'Add the values in a loop (total += x), or pass a NumPy array.',
+                )
             return (
                 f'sum_f({self.aref(arr)},fuel)?' if ELEMENT[kind] == 'f64' else f'sum_i({self.aref(arr)},fuel)?'
             ), ELEMENT[kind]
@@ -1079,8 +1438,8 @@ class Compiler:
                     kinds.append(self.types[bound[p].id])
                     continue
                 value, kind = self.expr(bound[p])
-                if kind not in SCALARS:
-                    self.fail(bound[p], f'arguments to {name}() must be int, float, bool or arrays')
+                if kind not in VALUES:
+                    self.fail(bound[p], f'arguments to {name}() must be numbers, characters, arrays or lists')
                 values.append(('value', value))
                 kinds.append(kind)
             else:
@@ -1139,6 +1498,8 @@ class Compiler:
         if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
             return f'!({self.condition(n.operand)})'
         ops = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
+        if isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], (ast.In, ast.NotIn)):
+            return self.membership(n)
         if isinstance(n, ast.Compare) and all(type(op) in ops for op in n.ops):
             # Chained comparisons: operands are pure, so evaluating one that Python
             # would have short-circuited can at most cause a guard failure and replay.
@@ -1169,8 +1530,8 @@ class Compiler:
                     }[kind]
                     parts.append(f'({{ let c={c}; {test} }})')
                     continue
-                if ta != tb or ta not in ('i64', 'f64'):
-                    self.fail(n, 'comparison operands must be int, float or bool values')
+                if ta != tb or ta not in ('i64', 'f64', 'char'):
+                    self.fail(n, 'comparison operands must be numbers, or one character on both sides')
                 parts.append(f'(({a}) {ops[type(op)]} ({b}))')
             return '(' + ' && '.join(parts) + ')'
         value, kind = self.expr(n)
@@ -1180,9 +1541,31 @@ class Compiler:
             return f'(({value}) != 0i64)'
         if kind == 'f64':
             return f'(({value}) != 0.0f64)'  # NaN is truthy, -0.0 is falsy, as in Python
+        if kind == 'char':
+            return 'true'  # a one-character string is never empty
         self.fail(
             n, 'arrays and tuples cannot be used as conditions', 'Use len(a) > 0 to test whether an array is empty.'
         )
+
+    def membership(self, n):
+        """ch in 'aeiou', ch in s, ch not in ...: one character looked up in a string."""
+        value, kind = self.expr(n.left)
+        right = n.comparators[0]
+        negate = isinstance(n.ops[0], ast.NotIn)
+        if kind != 'char':
+            self.fail(
+                n,
+                '`in` is compiled only for one character in a string, like ch in "aeiou"',
+                'For numbers, compare with == in a loop.',
+            )
+        if isinstance(right, ast.Constant) and type(right.value) is str:
+            codes = sorted({ord(c) for c in right.value})
+            test = f'[{",".join(f"{c}u32" for c in codes)}].contains(&({value}))' if codes else 'false'
+        elif isinstance(right, ast.Name) and self.types.get(right.id) == 'str' and right.id in self.assigned:
+            test = f'has({self.aref(right.id)},{value})'
+        else:
+            self.fail(n, 'the right side of `in` must be a string')
+        return f'(!({test}))' if negate else f'({test})'
 
     def compare_operand(self, node):
         """Return (rust, kind, exact_int_literal_or_None)."""
@@ -1234,6 +1617,7 @@ class Compiler:
     def store(self, node, target, value_node, op=None):
         """a[i] = v, a[i, j] = v, a[i][j] = v, or the op= forms."""
         name, kind, idx = self.indices(target)
+        self.check_writable(name, node)
         if name in self.params and name not in self.written:
             self.written.add(name)
         element = ELEMENT[kind]
@@ -1244,7 +1628,19 @@ class Compiler:
         writer = 'put' if len(idx) == 1 else 'put2'
         current_name = f'__element{j}'
         if op is None:
-            value, vkind = self.scalar(value_node)
+            value, vkind = self.expr(value_node)
+            if kind in LIST_KINDS and vkind != element:
+                # A list keeps the exact object: lst[i] = 1 stores an int even in a list of floats.
+                self.fail(
+                    node,
+                    f'a list of {"floats" if element == "f64" else "ints"} can only store '
+                    f'{"float" if element == "f64" else "int"} values here',
+                    'Convert first, for example lst[i] = float(x), so the list keeps one type.',
+                )
+            if vkind == 'bool':
+                value, vkind = f'({value} as i64)', 'i64'
+            elif vkind not in ('i64', 'f64'):
+                self.fail(node, 'only numbers can be stored in arrays and lists')
         else:
             if not isinstance(op, (ast.Add, ast.Sub, ast.Mult)) and not (element == 'f64' and isinstance(op, ast.Div)):
                 self.fail(node, 'array elements support +=, -=, *= (and /= for float arrays)')
@@ -1476,7 +1872,7 @@ let current{j}=cursor{j}; cursor{j}+=step{j};
             index_target = self.assign(
                 n, n.target.elts[0].id, f'(start{j}).checked_add(idx{j} as i64).ok_or(1)?', 'i64'
             )
-            item_target = self.assign(n, n.target.elts[1].id, f'at({self.aref(arr)},idx{j} as i64)?', ELEMENT[kind])
+            item_target = self.assign(n, n.target.elts[1].id, *self.read(f'at({self.aref(arr)},idx{j} as i64)?', kind))
             header = f"""{{ let start{j}: i64 = {start}; let n{j} = ({self.aref(arr)}).len; let mut k{j}: usize = 0;
 while k{j} < n{j} {{
 tick(fuel)?;
@@ -1489,7 +1885,7 @@ let idx{j}=k{j}; k{j}+=1;
                 self.fail(call, 'looping over a 2-D array yields rows; loop over range(a.shape[0]) instead')
             if not isinstance(n.target, ast.Name):
                 self.fail(n.target, 'use one loop variable: for x in a')
-            item_target = self.assign(n, n.target.id, f'at({self.aref(arr)},idx{j} as i64)?', ELEMENT[kind])
+            item_target = self.assign(n, n.target.id, *self.read(f'at({self.aref(arr)},idx{j} as i64)?', kind))
             header = f"""{{ let n{j} = ({self.aref(arr)}).len; let mut k{j}: usize = 0;
 while k{j} < n{j} {{
 tick(fuel)?;
@@ -1498,8 +1894,9 @@ let idx{j}=k{j}; k{j}+=1;
         else:
             self.fail(
                 n.iter,
-                'for loops must use range(...), a NumPy array, enumerate(array) or prange(...)',
-                'To loop over a list, pass it as a NumPy array: np.asarray(values, dtype=np.float64).',
+                'for loops must use range(...), an array, list, str, bytes or Series argument, '
+                'enumerate(...) of one of those, or prange(...)',
+                'Loop over a local name, for example: for x in values.',
             )
         self.loop_depth += 1
         body = self.block(n.body)
@@ -1528,7 +1925,7 @@ let idx{j}=k{j}; k{j}+=1;
                     writes.add(base.id)
             if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                 augmented.add(node.target.id)
-        outer = {v for v in self.assigned if v != var and self.types.get(v) in SCALARS}
+        outer = {v for v in self.assigned if v != var and self.types.get(v) in VALUES}
         arrays = {v for v in self.assigned if self.types.get(v) in ARRAY_KINDS}
         reductions = augmented & outer
         self.parallel = {
@@ -1551,12 +1948,8 @@ let idx{j}=k{j}; k{j}+=1;
         finally:
             self.parallel = None
         self.assigned = before
-        inner = [k for k in self.types if k not in saved_types and k != var and self.types[k] in SCALARS]
-        decls = ' '.join(
-            f'let mut {self.name(k)}: {RUST_TYPE[self.types[k]]} = '
-            f'{ {"f64": "0.0", "bool": "false"}.get(self.types[k], "0") };'
-            for k in inner
-        )
+        inner = [k for k in self.types if k not in saved_types and k != var and self.types[k] in VALUES]
+        decls = ' '.join(f'let mut {self.name(k)}: {RUST_TYPE[self.types[k]]} = {ZERO[self.types[k]]};' for k in inner)
         reds = sorted(reductions)
         j = self.temp('P')
         part_type = '(' + ','.join('i64' for _ in reds) + (',' if len(reds) == 1 else '') + ')'
@@ -1590,7 +1983,8 @@ let results{j}: Vec<Result<{part_type},i32>> = std::thread::scope(|scope| {{
     while lo < stop{j} {{
         let hi = if stop{j} - lo > chunk{j} {{ lo + chunk{j} }} else {{ stop{j} }};
         handles.push(scope.spawn(move || -> Result<{part_type},i32> {{
-            let mut ctx = Ctx{{fuel: u64::MAX, cancel: cancel{j}.get() as *const AtomicU8, ticks: 0}};
+            let mut ctx = Ctx{{fuel: u64::MAX, cancel: cancel{j}.get() as *const AtomicU8, ticks: 0,
+                              rng: std::ptr::null_mut(), gauss: std::ptr::null_mut()}};
             let fuel = &mut ctx;
             {part_init}
             let mut i = lo;
@@ -1633,9 +2027,8 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
                 continue
             if t in ARRAY_KINDS:
                 declarations.append(f'let mut {self.name(k)}: {rust_type(t)} = Arr::empty();')
-            elif t in SCALARS:
-                init = {'f64': '0.0', 'bool': 'false'}.get(t, '0')
-                declarations.append(f'let mut {self.name(k)}: {RUST_TYPE[t]} = {init};')
+            elif t in VALUES:
+                declarations.append(f'let mut {self.name(k)}: {RUST_TYPE[t]} = {ZERO[t]};')
         arguments = []
         for p in self.params:
             kind = self.types[p]
@@ -1663,7 +2056,9 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
             name, kind = self.name(p), self.types[p]
             if kind in ARRAY_KINDS:
                 element = ELEMENT[kind]
-                track = 'true' if p in self.written else 'false'
+                # Lists are private copies, so they need no undo information.
+                # The result array of @vectorize is fresh on every call, so a failed call needs no undo.
+                track = 'true' if p in self.written and kind in NUMPY_KINDS and p != '_pyrust_out' else 'false'
                 ffi += [f'{name}: *mut {element}', f'{name}_rows: usize', f'{name}_cols: usize']
                 setup.append(f'let mut a_{name} = Arr::<{element}>::view({name},{name}_rows,{name}_cols,{track});')
                 calls.append(f'&mut a_{name}' if p in self.written else f'&a_{name}')
@@ -1692,9 +2087,14 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
             ffi.append(f'out0: *mut {RUST_TYPE[rt]}')
             store = '*out0=v;'
         ffi += ['fuel: u64', 'cancel: *const AtomicU8']
+        if self.program['random']:
+            ffi += ['rng: *mut u32', 'gauss: *mut f64']
+            context = 'Ctx{fuel, cancel, ticks: 0, rng, gauss}'
+        else:
+            context = 'Ctx{fuel, cancel, ticks: 0, rng: std::ptr::null_mut(), gauss: std::ptr::null_mut()}'
         calls += ['&mut ctx', '0']
         callees = '\n'.join(self.program['functions'])
-        return f"""// Generated by PyRust Engine 0.7.
+        return f"""// Generated by PyRust Engine 0.7.1.
 #![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true,unused_braces,unused_unsafe,non_snake_case,unused_imports)]
 {HELPERS}
 {callees}
@@ -1703,7 +2103,7 @@ static QUIET: std::sync::Once = std::sync::Once::new();
 #[no_mangle]
 pub unsafe extern "C" fn pyrust_run({', '.join(ffi)})->i32{{
 QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {{}})));
-let mut ctx = Ctx{{fuel, cancel, ticks: 0}};
+let mut ctx = {context};
 {chr(10).join(setup)}
 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute({', '.join(calls)})));
 let status = match result {{ Ok(Ok(v)) => {{ {store} 0 }}, Ok(Err(code)) => code, Err(_) => 8 }};
