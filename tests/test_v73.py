@@ -236,7 +236,9 @@ class Columns(unittest.TestCase):
 
     def test_lists(self):
         self.same(vectorize(k.domain_length), k.domain_length, ['a@b.com', 'x', '@'])
-        self.same(vectorize(k.flag_score), k.flag_score, [True, False, True], [1.0, 2.0, 3.0])
+        scorer = vectorize(k.flag_score)
+        self.same(scorer, k.flag_score, [True, False, True], [1.0, 2.0, 3.0])
+        native(self, scorer)
         self.same(vectorize(k.clean), k.clean, [' Hi ', 'YO', ''])
         self.same(vectorize(k.bool_sum), k.bool_sum, [True, True, False], [True, False, False])
 
@@ -247,7 +249,9 @@ class Columns(unittest.TestCase):
         self.assertEqual(result.dtype, np.bool_)
         if NUMPY2:
             x = np.array([0.1, 1.5, -2.0], dtype=np.float32)
-            result = vectorize(k.scale32)(x)
+            scaled = vectorize(k.scale32)
+            result = scaled(x)
+            native(self, scaled)
             self.assertEqual(result.dtype, np.float32)
             self.assertEqual(result.tolist(), [float(k.scale32(v)) for v in x])
 
@@ -261,10 +265,14 @@ class Columns(unittest.TestCase):
             },
             index=[10, 20, 30, 40],
         )
-        result = self.same(vectorize(k.domain_length), k.domain_length, df['email'])
+        domain = vectorize(k.domain_length)
+        result = self.same(domain, k.domain_length, df['email'])
         self.assertEqual(list(result.index), [10, 20, 30, 40])
+        native(self, domain)
         self.same(vectorize(k.flag_score), k.flag_score, df['active'], df['x'])
-        self.same(vectorize(k.clean), k.clean, df['email'])
+        cleaner = vectorize(k.clean)
+        self.same(cleaner, k.clean, df['email'])
+        native(self, cleaner)
         self.same(vectorize(k.domain_length), k.domain_length, df['email'].astype(object))
         missing = pd.Series(['a@b', None])
         self.assertEqual(vectorize(k.clean)(pd.Series([' A', 'b '])).tolist(), ['a', 'b'])
@@ -274,7 +282,9 @@ class Columns(unittest.TestCase):
     @unittest.skipUnless(POLARS, 'polars required')
     def test_polars(self):
         frame = pl.DataFrame({'email': ['a@b.com', 'q', 'zz@y'], 'x': [1.0, 2.0, 3.0], 'on': [True, False, True]})
-        result = self.same(vectorize(k.domain_length), k.domain_length, frame['email'])
+        domain = vectorize(k.domain_length)
+        result = self.same(domain, k.domain_length, frame['email'])
+        native(self, domain)
         self.assertIsInstance(result, pl.Series)
         self.assertEqual(result.name, 'email')
         self.same(vectorize(k.flag_score), k.flag_score, frame['on'], frame['x'])
@@ -333,6 +343,7 @@ class Okapi(unittest.TestCase):
             index = ai.BM25Okapi(corpus, **params)
             for q in self.QUERIES:
                 self.assertTrue(np.array_equal(index.get_scores(q), okapi_reference(corpus, q, **params)), (params, q))
+        native(self, ai._okapi_compiled)
 
     @unittest.skipUnless(RANK_BM25, 'rank_bm25 required')
     def test_drop_in_for_rank_bm25(self):
@@ -449,6 +460,48 @@ class Keyword(unittest.TestCase):
 
 
 @unittest.skipUnless(NUMPY, 'NumPy required')
+class KernelsCompile(unittest.TestCase):
+    """The library's kernels must compile (checked without Rust): a kernel that silently
+    ran as Python would still give right answers, only slowly."""
+
+    def test_ai_kernels(self):
+        rows = dict(rows='iarray', use_rows='bool', out='iarray')
+        Compiler(ai._hamming_rows, kinds=dict(matrix='iarray2', query='iarray', **rows)).generate()
+        Compiler(ai._int8_rows, kinds=dict(matrix='iarray2', lanes='iarray', **rows)).generate()
+        postings = dict(
+            terms='iarray',
+            starts='iarray',
+            stops='iarray',
+            postings_doc='iarray',
+            postings_tf='iarray',
+            idf='array',
+            doc_len='array',
+            avgdl='f64',
+            k1='f64',
+            b='f64',
+            out='array',
+        )
+        Compiler(ai._okapi_kernel, kinds=postings).generate()
+        Compiler(ai._bm25_kernel, kinds=postings).generate()
+
+    def test_vectorize_result_kinds(self):
+        self.assertEqual(vectorize(k.domain_length).out_kind(('strv',)), 'i64')
+        self.assertEqual(vectorize(k.clean).out_kind(('strv',)), 'strv')
+        self.assertEqual(vectorize(k.flag_score).out_kind(('bool', 'f64')), 'f64')
+        self.assertEqual(vectorize(k.flip).out_kind(('bool',)), 'bool')
+        if NUMPY2:
+            self.assertEqual(vectorize(k.scale32).out_kind(('f32',)), 'f32')
+
+
+def native(test, compiled):
+    """With Rust, the last call really ran natively."""
+    if RUST:
+        report = compiled.report()
+        test.assertEqual(report['backend'], 'rust', report.get('reason'))
+        test.assertGreater(report['native_calls'], 0)
+
+
+@unittest.skipUnless(NUMPY, 'NumPy required')
 class Vectors(unittest.TestCase):
     def test_hamming(self):
         rng = np.random.default_rng(7)
@@ -468,6 +521,7 @@ class Vectors(unittest.TestCase):
         # ties and identical rows
         matrix = np.zeros((5, 8), dtype=np.uint8)
         self.assertEqual(ai.hamming_top_k(np.zeros(8, dtype=np.uint8), matrix, 3)[0].tolist(), [0, 1, 2])
+        native(self, ai._hamming_compiled)
         sliced = rng.integers(0, 256, (20, 17), dtype=np.uint8)[:, 1:]  # not contiguous
         q = rng.integers(0, 256, 16, dtype=np.uint8)
         d = np.unpackbits(sliced ^ q, axis=1).sum(axis=1)
@@ -489,6 +543,7 @@ class Vectors(unittest.TestCase):
             ids, _ = ai.int8_top_k(query, matrix, 5, mask=mask)
             allowed = np.flatnonzero(mask)
             self.assertEqual(ids.tolist(), allowed[np.lexsort((allowed, -scores[allowed]))][:5].tolist())
+        native(self, ai._int8_compiled)
         extreme = np.full((3, 16), -128, dtype=np.int8)
         self.assertEqual(ai.int8_top_k(np.full(16, -128, dtype=np.int8), extreme, 1)[1].tolist(), [16 * 128 * 128])
 

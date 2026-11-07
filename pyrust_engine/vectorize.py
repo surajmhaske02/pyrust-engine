@@ -148,7 +148,9 @@ class Vectorized:
         """Result kind of the function for these element kinds, or None if it cannot compile."""
         if kinds not in self.out_kinds:
             try:
-                compiler = Compiler(self.python, kinds=dict(zip(list(self.python.__code__.co_varnames), kinds)))
+                # Compiled on its own, a str parameter has kind 'str' (in the loop it receives 'strv').
+                own = ['str' if kind == 'strv' else kind for kind in kinds]
+                compiler = Compiler(self.python, kinds=dict(zip(list(self.python.__code__.co_varnames), own)))
                 compiler.generate()
                 kind = compiler.return_type
                 self.out_kinds[kinds] = kind if kind in _RESULT_KINDS else None

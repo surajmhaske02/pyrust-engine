@@ -875,7 +875,7 @@ class _Optimized:
         perf_counter = time.perf_counter
         byref = ctypes.byref
 
-        def general(args, kwargs, first_status=None):
+        def general(args, kwargs, first_status=None, known_kinds=None):
             start = perf_counter() if timing else 0.0
             native_elapsed = None
             try:
@@ -892,7 +892,7 @@ class _Optimized:
                     values = tuple(bound.arguments.values())
                 else:
                     values = args  # fast path: exact positional call
-                kinds = _kinds_of(values)
+                kinds = known_kinds if known_kinds is not None else _kinds_of(values)
                 native = specs.get(kinds)
                 if native is None:
                     if None in kinds:
@@ -981,19 +981,20 @@ class _Optimized:
                 and fn.__defaults__ is defaults0
                 and fn.__kwdefaults__ is kwdefaults0
             ):
-                native = specs.get(_kinds_of(args))
+                kinds = _kinds_of(args)
+                native = specs.get(kinds)
                 if native is not None and native.fast is not None:
                     if native.checks:
                         for namespace, builtin_ns, name, expected in native.guards:
                             if namespace.get(name, builtin_ns.get(name)) is not expected:
-                                return general(args, kwargs)
+                                return general(args, kwargs, known_kinds=kinds)
                         for callee, code, defaults in native.code_guards:
                             if callee.__code__ is not code or callee.__defaults__ is not defaults:
-                                return general(args, kwargs)
+                                return general(args, kwargs, known_kinds=kinds)
                     result = native.fast(*args, budget)
                     status = result.status
                     if status:
-                        return general(args, kwargs, status)
+                        return general(args, kwargs, status, kinds)
                     with metrics_lock:
                         state['calls'] += 1
                         state['native_calls'] += 1
@@ -1001,6 +1002,7 @@ class _Optimized:
                             state['reason'] = None
                             state['backend'] = 'rust'
                     return None if native.void else result.value
+                return general(args, kwargs, known_kinds=kinds)
             return general(args, kwargs)
 
         def rust_source(kinds=None):

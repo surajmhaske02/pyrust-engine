@@ -369,26 +369,32 @@ def cosine_top_k(query, matrix, k: int = 10, mask=None):
 _SIGN = 9223372036854775807  # 2**63 - 1
 
 
+def _hamming_row(matrix: I64Array2, i: int, query: I64Array) -> int:
+    total = 0
+    for j in range(matrix.shape[1]):
+        x = matrix[i, j] ^ query[j]
+        total += (x & _SIGN).bit_count() + (1 if x < 0 else 0)
+    return total
+
+
 def _hamming_rows(matrix: I64Array2, query: I64Array, rows: I64Array, use_rows: bool, out: I64Array) -> None:
     for t in prange(out.shape[0]):
-        i = rows[t] if use_rows else t
-        total = 0
-        for j in range(matrix.shape[1]):
-            x = matrix[i, j] ^ query[j]
-            total += (x & _SIGN).bit_count() + (1 if x < 0 else 0)
-        out[t] = total
+        out[t] = _hamming_row(matrix, rows[t] if use_rows else t, query)
 
 
-def _int8_rows(matrix: I64Array2, query: I64Array, rows: I64Array, use_rows: bool, out: I64Array) -> None:
+def _int8_row(matrix: I64Array2, i: int, lanes: I64Array) -> int:
+    total = 0
+    for j in range(matrix.shape[1]):
+        word = matrix[i, j]
+        for b in range(8):
+            v = (word >> (8 * b)) & 255
+            total += (v - 256 if v >= 128 else v) * lanes[8 * j + b]
+    return total
+
+
+def _int8_rows(matrix: I64Array2, lanes: I64Array, rows: I64Array, use_rows: bool, out: I64Array) -> None:
     for t in prange(out.shape[0]):
-        i = rows[t] if use_rows else t
-        total = 0
-        for j in range(matrix.shape[1]):
-            word = matrix[i, j]
-            for b in range(8):
-                v = (word >> (8 * b)) & 255
-                total += (v - 256 if v >= 128 else v) * query[8 * j + b]
-        out[t] = total
+        out[t] = _int8_row(matrix, rows[t] if use_rows else t, lanes)
 
 
 _hamming_compiled = optimize(_hamming_rows, warn_on_fallback=False)
@@ -453,7 +459,7 @@ def int8_top_k(query, matrix, k: int = 10, mask=None):
     words, query, n = _as_words(np, matrix, query, np.int8, 'int8_top_k')
     rows, use_rows, count = _rows_for(np, mask, n)
     out = np.empty(count, dtype=np.int64)
-    _int8_compiled(words, query.astype(np.int64), rows, use_rows, out)
+    _int8_compiled(words, np.ascontiguousarray(query.astype(np.int64)), rows, use_rows, out)
     order, best = top_k(out, k)
     return (rows[order] if use_rows else order), best
 
@@ -483,16 +489,6 @@ def quantize_int8(embeddings, scale=None):
 
 
 # ------------------------------------------------------------- BM25 indexes
-def _term_counts(tokens: list[str]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for t in tokens:
-        counts[t] = counts.get(t, 0) + 1
-    return counts
-
-
-_term_counts_compiled = optimize(_term_counts, warn_on_fallback=False)
-
-
 def _bm25_kernel(
     terms,
     starts,
@@ -547,6 +543,10 @@ _okapi_compiled = optimize(_okapi_kernel, warn_on_fallback=False)
 _FORMAT = 'pyrust-bm25-1'
 
 
+def _no_ids(np):
+    return np.zeros(0, dtype=np.int64)
+
+
 class _Postings:
     """Documents stored as term counts, with ids that never change.
 
@@ -564,6 +564,8 @@ class _Postings:
         self._doc_ptr = np.zeros(1, dtype=np.int64)
         self._doc_terms = np.zeros(0, dtype=np.int64)
         self._doc_tfs = np.zeros(0, dtype=np.int64)
+        self._doc_first = np.zeros(0, dtype=np.int64)
+        self._tokens_seen = 0
         self._lengths = np.zeros(0, dtype=np.int64)
         self._alive = np.zeros(0, dtype=np.bool_)
 
@@ -572,42 +574,60 @@ class _Postings:
         return document if isinstance(document, list) else tokenize(document)
 
     def _append(self, token_lists):
-        """Store tokenized documents; returns their ids."""
+        """Store tokenized documents; returns their ids.
+
+        Term ids follow first appearance. Each document stores (term id, count, position
+        of the term's first occurrence); counting is done with NumPy on the whole batch.
+        """
         np = _numpy()
         vocabulary, terms = self.vocabulary, self._terms
-        doc_terms, doc_tfs, sizes, lengths = [], [], [], []
-        for tokens in token_lists:
-            counts = _term_counts_compiled(tokens)
-            for term, count in counts.items():
-                term_id = vocabulary.get(term)
-                if term_id is None:
-                    term_id = vocabulary[term] = len(terms)
-                    terms.append(term)
-                doc_terms.append(term_id)
-                doc_tfs.append(count)
-            sizes.append(len(counts))
-            lengths.append(len(tokens))
-        first = self._lengths.shape[0]
-        self._doc_terms = np.concatenate([self._doc_terms, np.array(doc_terms, dtype=np.int64)])
-        self._doc_tfs = np.concatenate([self._doc_tfs, np.array(doc_tfs, dtype=np.int64)])
-        ends = self._doc_ptr[-1] + np.cumsum(np.array(sizes, dtype=np.int64))
-        self._doc_ptr = np.concatenate([self._doc_ptr, ends])
-        self._lengths = np.concatenate([self._lengths, np.array(lengths, dtype=np.int64)])
-        self._alive = np.concatenate([self._alive, np.ones(len(lengths), dtype=np.bool_)])
-        return np.arange(first, first + len(lengths), dtype=np.int64)
+        lengths = np.fromiter(map(len, token_lists), dtype=np.int64, count=len(token_lists))
+        flat = [token for tokens in token_lists for token in tokens]
+        for term in dict.fromkeys(flat):  # new words, in order of first appearance
+            if term not in vocabulary:
+                vocabulary[term] = len(terms)
+                terms.append(term)
+        ids = np.fromiter(map(vocabulary.__getitem__, flat), dtype=np.int64, count=len(flat))
+        docs = np.repeat(np.arange(lengths.shape[0], dtype=np.int64), lengths)
+        width = max(len(terms), 1)
+        keys = docs * width + ids
+        order = np.argsort(keys)  # positions of the tokens, grouped by (document, term)
+        grouped = keys[order]
+        starts = np.flatnonzero(np.concatenate([[True], grouped[1:] != grouped[:-1]])) if grouped.size else _no_ids(np)
+        unique = grouped[starts]
+        counts = np.diff(np.concatenate([starts, [grouped.shape[0]]]))
+        first = np.minimum.reduceat(order, starts) + self._tokens_seen if starts.size else _no_ids(np)
+        sizes = np.bincount(unique // width, minlength=lengths.shape[0]).astype(np.int64)
+        first_id = self._lengths.shape[0]
+        self._doc_terms = np.concatenate([self._doc_terms, (unique % width).astype(np.int64)])
+        self._doc_tfs = np.concatenate([self._doc_tfs, counts.astype(np.int64)])
+        self._doc_first = np.concatenate([self._doc_first, first.astype(np.int64)])
+        self._doc_ptr = np.concatenate([self._doc_ptr, self._doc_ptr[-1] + np.cumsum(sizes)])
+        self._lengths = np.concatenate([self._lengths, lengths])
+        self._alive = np.concatenate([self._alive, np.ones(lengths.shape[0], dtype=np.bool_)])
+        self._tokens_seen += len(flat)
+        return np.arange(first_id, first_id + lengths.shape[0], dtype=np.int64)
 
     def _live_postings(self):
-        """Term-major postings of the live documents (doc ids ascending within a term)."""
+        """Term-major postings of the live documents (doc ids ascending within a term), and
+        the live terms in order of first appearance."""
         np = _numpy()
         per_doc = np.diff(self._doc_ptr)
         keep = np.repeat(self._alive, per_doc)
+        slots = max(self._lengths.shape[0], 1)
         docs = np.repeat(np.arange(self._lengths.shape[0], dtype=np.int64), per_doc)[keep]
         terms = self._doc_terms[keep]
-        tfs = self._doc_tfs[keep]
-        order = np.argsort(terms, kind='stable')
+        order = np.argsort(terms * slots + docs)  # (term, doc) pairs are unique
         df = np.bincount(terms, minlength=len(self._terms)).astype(np.int64)
         stops = np.cumsum(df)
-        return terms, df, stops - df, stops, docs[order], tfs[order]
+        starts = stops - df
+        present = np.flatnonzero(df)
+        if present.size:
+            first = np.minimum.reduceat(self._doc_first[keep][order], starts[present])
+            appearance = present[np.argsort(first)]
+        else:
+            appearance = present
+        return appearance, df, starts, stops, docs[order], self._doc_tfs[keep][order]
 
     # ------------------------------------------------------------ changes
     def add(self, documents):
@@ -657,6 +677,7 @@ class _Postings:
             doc_ptr=self._doc_ptr,
             doc_terms=self._doc_terms,
             doc_tfs=self._doc_tfs,
+            doc_first=self._doc_first,
             lengths=self._lengths,
             alive=self._alive,
         )
@@ -679,6 +700,8 @@ class _Postings:
             index._doc_ptr = data['doc_ptr']
             index._doc_terms = data['doc_terms']
             index._doc_tfs = data['doc_tfs']
+            index._doc_first = data['doc_first']
+            index._tokens_seen = int(data['lengths'].sum())
             index._lengths = data['lengths']
             index._alive = data['alive'].copy()
         index._refresh()
@@ -799,18 +822,14 @@ class BM25Okapi(_Postings):
 
     def _refresh(self):
         np = _numpy()
-        terms, df, self._starts, self._stops, self._pdoc, self._ptf = self._live_postings()
+        appearance, df, self._starts, self._stops, self._pdoc, self._ptf = self._live_postings()
         live = self._lengths[self._alive]
         self.corpus_size = int(live.size)
         self.doc_len = self._lengths.tolist()
         self._doc_len = self._lengths.astype(np.float64)
         self.avgdl = int(live.sum()) / self.corpus_size  # ZeroDivisionError for no documents, like rank_bm25
         # idf in rank_bm25's order (terms by first appearance) so the average is the same float.
-        if terms.size:
-            unique, first = np.unique(terms, return_index=True)
-            order = unique[np.argsort(first, kind='stable')].tolist()
-        else:
-            order = []
+        order = appearance.tolist()
         counts = df.tolist()
         idf = [0.0] * len(self._terms)
         negative = []
