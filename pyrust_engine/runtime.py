@@ -16,7 +16,7 @@ import warnings
 from collections import Counter
 from typing import Any, Callable, Optional, ParamSpec, Protocol, TypeVar, overload
 
-from . import prebuilt, toolchain
+from . import packing, prebuilt, toolchain
 from .cache import cache_root, cached_path, compile_library, process_lock
 from .compiler import (
     ARRAY_INFO,
@@ -25,6 +25,7 @@ from .compiler import (
     Compiler,
     Unsupported,
     default_kinds,
+    is_packed,
     kind_of_value,
     tuple_parts,
 )
@@ -56,18 +57,35 @@ _TYPE_NAMES = {
     'str': 'str',
     'bytes': 'bytes',
     'char': 'str (one character)',
+    'strv': 'str',
+    'slist': 'list[str]',
+    'f32': 'numpy.float32',
+    'farray': 'F32Array',
+    'farray2': 'F32Array2',
     'none': 'None',
 }
-_CTYPE = {'i64': ctypes.c_int64, 'f64': ctypes.c_double, 'bool': ctypes.c_bool, 'char': ctypes.c_uint32}
-_ELEMENT_CTYPE = {'f64': ctypes.c_double, 'i64': ctypes.c_int64}
+_ITEM_NAMES = {'strv': 'str', 'i64': 'int', 'f64': 'float', 'bool': 'bool'}
+_CTYPE = {
+    'i64': ctypes.c_int64,
+    'f64': ctypes.c_double,
+    'bool': ctypes.c_bool,
+    'char': ctypes.c_uint32,
+    'f32': ctypes.c_float,
+}
+_ELEMENT_CTYPE = {'f64': ctypes.c_double, 'i64': ctypes.c_int64, 'f32': ctypes.c_float}
 _LIST_TYPECODE = {'flist': 'd', 'ilist': 'q'}
-_NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64'}
+_NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64', 'f32': 'float32'}
 FAST_BUDGET = 50_000_000  # iterations run inline; longer calls move to an interruptible thread
 UNLIMITED = 2**64 - 1
 MAX_SPECIALIZATIONS = 16
 
 
 def _type_name(kind):
+    if kind.startswith('dict('):
+        k, v = kind[5:-1].split(',')
+        return f'dict[{_ITEM_NAMES[k]}, {_ITEM_NAMES[v]}]'
+    if kind.startswith('set('):
+        return f'set[{_ITEM_NAMES[kind[4:-1]]}]'
     parts = tuple_parts(kind)
     if parts:
         return 'tuple[' + ', '.join(_TYPE_NAMES[p] for p in parts) + ']'
@@ -277,11 +295,19 @@ class _Native:
         for kind in self.kinds:
             if kind in ARRAY_INFO:
                 argtypes += [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t]
+            elif is_packed(kind):
+                argtypes += [ctypes.c_void_p, ctypes.c_size_t]
             else:
                 argtypes.append(_CTYPE[kind])
+        self.has_arrays = self.has_arrays or any(is_packed(k) for k in self.kinds)
         rt = self.returns
         self.free = None
-        if rt in ARRAY_INFO:
+        if is_packed(rt):
+            self.out_types = (ctypes.c_void_p, ctypes.c_size_t)
+            self.free = lib.pyrust_free_u8
+            self.free.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            self.free.restype = None
+        elif rt in ARRAY_INFO:
             element = ARRAY_INFO[rt][0]
             self.out_types = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t)
             self.free = getattr(lib, f'pyrust_free_{element}')
@@ -304,6 +330,18 @@ class _Native:
         rt = self.returns
         if rt == 'none':
             return None
+        if is_packed(rt):
+            ptr, n = (o.value for o in outs)
+            n = n or 0
+            try:
+                data = ctypes.string_at(ptr, n) if n else b''
+            finally:
+                self.free(ptr, n)
+            return packing.unpack(rt, data)
+        if rt == 'f32':
+            import numpy as np
+
+            return np.float32(outs[0].value)
         if rt in LIST_KINDS:
             element = ARRAY_INFO[rt][0]
             ptr, n, _, _ = (o.value for o in outs)
@@ -718,6 +756,10 @@ class _Optimized:
                 keep.append(raw)
             elif kind == 'bytes':
                 args += [ctypes.cast(ctypes.c_char_p(value), ctypes.c_void_p).value, len(value), 1]
+            elif is_packed(kind):
+                data = packing.pack(kind, value)
+                args += [ctypes.cast(ctypes.c_char_p(data), ctypes.c_void_p).value, len(data)]
+                keep.append(data)
             elif kind in ARRAY_INFO:
                 flags = value.flags
                 if not (value.dtype.isnative and flags.c_contiguous and flags.aligned):

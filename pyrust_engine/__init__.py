@@ -1,5 +1,5 @@
 from .cache import prune_cache
-from .compiler import F64Array, F64Array2, I64Array, I64Array2, Unsupported, prange
+from .compiler import F32Array, F32Array2, F64Array, F64Array2, I64Array, I64Array2, Unsupported, prange
 from .runtime import OptimizationError, OptimizedFunction, PyRustFallbackWarning, RustToolchainWarning, optimize
 from .toolchain import check_rust, doctor
 from .vectorize import vectorize
@@ -21,9 +21,11 @@ __all__ = [
     'I64Array',
     'F64Array2',
     'I64Array2',
+    'F32Array',
+    'F32Array2',
     'prune_cache',
 ]
-__version__ = '0.7.1'
+__version__ = '0.7.2'
 
 
 def load_ipython_extension(ipython):

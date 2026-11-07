@@ -120,7 +120,6 @@ class Compile(unittest.TestCase):
             (random_in_prange, None, 'not compiled inside prange'),
             (string_arithmetic, None, 'arithmetic'),
             (number_in, None, 'one character'),
-            (long_constant, None, 'one-character'),
         ):
             with self.assertRaises(Unsupported, msg=fn.__name__) as ctx:
                 Compiler(fn, kinds=kinds).generate()
