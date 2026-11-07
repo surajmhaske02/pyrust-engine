@@ -43,11 +43,13 @@ class Compile(unittest.TestCase):
                 a[i] = 1.5
         with self.assertRaises(Unsupported) as ctx:
             Compiler(bad).generate()
-        self.assertIn('I64Array elements can only be set to int', str(ctx.exception))
+        self.assertIn('int arrays can only be set to int values', str(ctx.exception))
 
-    def test_callee_cannot_write(self):
-        with self.assertRaises(Unsupported):
-            Compiler(_calls_writer).generate()
+    def test_callee_can_write(self):
+        # 0.7: helpers may write arrays they receive; the caller's array becomes written too.
+        compiler = Compiler(_calls_writer)
+        compiler.generate()
+        self.assertEqual(compiler.written, {'a'})
 
     def test_explain_mentions_types(self):
         text = optimize(k.histogram, warn_on_fallback=False).explain()
@@ -206,7 +208,9 @@ class ArrayWrites(unittest.TestCase):
 @unittest.skipUnless(RUST, 'rustc required')
 class MixedComparisons(unittest.TestCase):
     def test_exact_int_float_comparisons(self):
-        fn = optimize(k.compare_pairs, fallback=False)
+        # 0.7: ints beyond 2**53 replay in Python (NumPy scalars compare them differently), so
+        # results are still exact but those calls are not native.
+        fn = optimize(k.compare_pairs, warn_on_fallback=False)
         ints = [0, 1, -1, 3, 2**53, 2**53 + 1, 2**62, 2**63 - 1, -(2**63)]
         floats = [0.0, -0.0, 0.5, -0.5, 3.0, 2.9999999999999996, 9007199254740992.0, 9007199254740994.0,
                   4.611686018427388e18, 9.223372036854776e18, -9.223372036854776e18,

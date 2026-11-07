@@ -70,7 +70,7 @@ class Explain(unittest.TestCase):
             return total
         with self.assertRaises(Unsupported) as ctx:
             Compiler(accumulates).generate()
-        self.assertIn('start float variables at 0.0', str(ctx.exception))
+        self.assertIn('start float variables at 0.0', str(ctx.exception).lower())
 
     def test_explain_native(self):
         text = optimize(k.calls_helpers, warn_on_fallback=False).explain()

@@ -1,6 +1,29 @@
-from .runtime import optimize, OptimizationError, OptimizedFunction, PyRustFallbackWarning, RustToolchainWarning
-from .toolchain import check_rust, doctor
-from .compiler import Unsupported, F64Array, I64Array
 from .cache import prune_cache
-__all__ = ['optimize', 'OptimizationError', 'OptimizedFunction', 'PyRustFallbackWarning', 'RustToolchainWarning', 'check_rust', 'doctor', 'Unsupported', 'F64Array', 'I64Array', 'prune_cache']
-__version__ = '0.6.1'
+from .compiler import F64Array, F64Array2, I64Array, I64Array2, Unsupported, prange
+from .runtime import OptimizationError, OptimizedFunction, PyRustFallbackWarning, RustToolchainWarning, optimize
+from .toolchain import check_rust, doctor
+
+__all__ = [
+    'optimize',
+    'prange',
+    'OptimizationError',
+    'OptimizedFunction',
+    'PyRustFallbackWarning',
+    'RustToolchainWarning',
+    'check_rust',
+    'doctor',
+    'Unsupported',
+    'F64Array',
+    'I64Array',
+    'F64Array2',
+    'I64Array2',
+    'prune_cache',
+]
+__version__ = '0.7.0'
+
+
+def load_ipython_extension(ipython):
+    """`%load_ext pyrust_engine` adds %pyrust_check and %pyrust_benchmark."""
+    from .ipython import load
+
+    load(ipython)

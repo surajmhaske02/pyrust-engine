@@ -2,42 +2,180 @@
 
 Every native operation either produces exactly CPython's result or returns a
 non-zero status, in which case the runtime replays the call in Python.
+
+Kinds used for values:
+  'i64' int, 'f64' float, 'bool' bool,
+  'array' / 'iarray' 1-D float64 / int64 NumPy arrays,
+  'array2' / 'iarray2' 2-D float64 / int64 NumPy arrays,
+  'tuple(k1,k2,...)' tuples of scalars (return values and unpacking only),
+  'none' for functions that return None.
 """
+
 import ast
 import builtins
 import inspect
 import math
+import sys
 import textwrap
 import types
+
 
 class Unsupported(ValueError):
     pass
 
+
 class F64Array:
     """Annotation for a contiguous, aligned, native-endian 1-D NumPy float64 array.
 
-    Read elements with float(array[index]); write them with array[index] = value.
-    Writes go to a private copy that is published only when the native call succeeds,
-    so a replay in Python always starts from the original data.
+    Read elements with a[i] or float(a[i]); write them with a[i] = value. If a native
+    call fails halfway, its writes are undone before the call is replayed in Python.
     """
+
 
 class I64Array:
-    """Annotation for a contiguous, aligned, native-endian 1-D NumPy int64 array.
+    """Annotation for a contiguous, aligned, native-endian 1-D NumPy int64 array."""
 
-    Read elements with int(array[index]) or float(array[index]); write int values with
-    array[index] = value.
+
+class F64Array2:
+    """Annotation for a C-contiguous 2-D NumPy float64 array: read and write a[i, j]."""
+
+
+class I64Array2:
+    """Annotation for a C-contiguous 2-D NumPy int64 array: read and write a[i, j]."""
+
+
+def prange(*args):
+    """Like range(), but PyRust may run the iterations on several CPU cores.
+
+    In plain Python it is exactly range(). Use it only when iterations are independent:
+    each one writes its own array element (out[i] = ...) and may add to int totals.
     """
+    return range(*args)
 
-ARRAY_KINDS = ('array', 'iarray')
-ELEMENT = {'array': 'f64', 'iarray': 'i64'}
+
+ARRAY_INFO = {'array': ('f64', 1), 'iarray': ('i64', 1), 'array2': ('f64', 2), 'iarray2': ('i64', 2)}
+ARRAY_KINDS = tuple(ARRAY_INFO)
+ELEMENT = {k: v[0] for k, v in ARRAY_INFO.items()}
+SCALARS = ('i64', 'f64', 'bool')
+RUST_TYPE = {'i64': 'i64', 'f64': 'f64', 'bool': 'bool', 'none': '()'}
+ANNOTATIONS = {
+    int: 'i64',
+    'int': 'i64',
+    float: 'f64',
+    'float': 'f64',
+    bool: 'bool',
+    'bool': 'bool',
+    F64Array: 'array',
+    'F64Array': 'array',
+    I64Array: 'iarray',
+    'I64Array': 'iarray',
+    F64Array2: 'array2',
+    'F64Array2': 'array2',
+    I64Array2: 'iarray2',
+    'I64Array2': 'iarray2',
+}
+RETURN_ANNOTATIONS = {
+    int: 'i64',
+    'int': 'i64',
+    float: 'f64',
+    'float': 'f64',
+    bool: 'bool',
+    'bool': 'bool',
+    None: 'none',
+    'None': 'none',
+}
 MAX_DEPTH = 300  # native call depth; deeper recursion replays in Python (keeps thread stacks safe)
+PARALLEL_MIN = 4096  # prange loops shorter than this run on one core
 
 # Status codes shared with runtime._STATUS.
 #   1 integer overflow          2 zero divisor / zero range step
 #   3 array index out of bounds 4 iteration budget exceeded
 #   5 no scalar return          6 value outside the native fast path (math domain,
-#                                  float overflow, negative exponent, ...)
-HELPERS = r'''
+#                                  float overflow, negative exponent, huge int, ...)
+#   7 interrupted (Ctrl-C)      8 internal error (Rust panic), replayed in Python
+HELPERS = r"""
+use std::sync::atomic::{AtomicU8, Ordering};
+pub struct Ctx { fuel: u64, cancel: *const AtomicU8, ticks: u32 }
+fn tick(c:&mut Ctx)->Result<(),i32>{
+    if c.fuel==0 {return Err(4)}
+    c.fuel-=1;
+    c.ticks=c.ticks.wrapping_add(1);
+    if c.ticks & 0xFFFF==0 && !c.cancel.is_null() && unsafe{(*c.cancel).load(Ordering::Relaxed)}!=0 {return Err(7)}
+    Ok(())
+}
+#[derive(Clone,Copy)] struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
+pub struct Arr<T:Copy>{ ptr:*mut T, len:usize, rows:usize, cols:usize, track:bool,
+                        log:Vec<(usize,T)>, orig:Option<Vec<T>>, owned:Vec<T> }
+impl<T:Copy> Arr<T>{
+    fn view(ptr:*mut T,rows:usize,cols:usize,track:bool)->Arr<T>{
+        Arr{ptr,len:rows*cols,rows,cols,track,log:Vec::new(),orig:None,owned:Vec::new()}
+    }
+    fn empty()->Arr<T>{
+        Arr{ptr:std::ptr::null_mut(),len:0,rows:0,cols:0,track:false,log:Vec::new(),orig:None,owned:Vec::new()}
+    }
+    fn owned(rows:i64,cols:i64,fill:T)->Result<Arr<T>,i32>{
+        if rows<0 || cols<0 {return Err(6)}
+        let len=(rows as u64).checked_mul(cols as u64).ok_or(6)?;
+        if len>(1u64<<40) {return Err(6)}
+        let mut v:Vec<T>=Vec::new();
+        v.try_reserve_exact(len as usize).map_err(|_|6)?;
+        v.resize(len as usize,fill);
+        let ptr=v.as_mut_ptr();
+        Ok(Arr{ptr,len:len as usize,rows:rows as usize,cols:cols as usize,track:false,log:Vec::new(),orig:None,owned:v})
+    }
+    fn snapshot(&mut self){
+        // Keep a full copy of the original contents (used before parallel writes).
+        if self.track && self.orig.is_none() {
+            let mut o=unsafe{std::slice::from_raw_parts(self.ptr,self.len)}.to_vec();
+            for &(k,old) in self.log.iter().rev() {o[k]=old;}
+            self.orig=Some(o); self.log=Vec::new();
+        }
+    }
+    fn write(&mut self,j:usize,v:T){
+        if self.track && self.orig.is_none() {
+            self.log.push((j,unsafe{*self.ptr.add(j)}));
+            if self.log.len()>self.len {self.snapshot();}
+        }
+        unsafe{*self.ptr.add(j)=v;}
+    }
+    fn rollback(&mut self){
+        if !self.track {return}
+        unsafe{
+            if let Some(o)=&self.orig {std::ptr::copy_nonoverlapping(o.as_ptr(),self.ptr,self.len);}
+            else {for &(k,old) in self.log.iter().rev() {*self.ptr.add(k)=old;}}
+        }
+    }
+}
+fn index(len:usize,i:i64)->Result<usize,i32>{
+    let j=if i<0 {(len as i128)+(i as i128)} else {i as i128};
+    if j<0 || j>=len as i128 {Err(3)} else {Ok(j as usize)}
+}
+fn at<T:Copy>(a:&Arr<T>,i:i64)->Result<T,i32>{let j=index(a.len,i)?; Ok(unsafe{*a.ptr.add(j)})}
+fn at2<T:Copy>(a:&Arr<T>,i:i64,k:i64)->Result<T,i32>{
+    let r=index(a.rows,i)?; let c=index(a.cols,k)?; Ok(unsafe{*a.ptr.add(r*a.cols+c)})
+}
+fn put<T:Copy>(a:&mut Arr<T>,i:i64,v:T)->Result<(),i32>{let j=index(a.len,i)?; a.write(j,v); Ok(())}
+// Parallel loops write distinct elements of a snapshotted array through a shared view.
+unsafe impl<T:Copy> Sync for Arr<T> {}
+unsafe impl<T:Copy> Send for Arr<T> {}
+fn put_par<T:Copy>(a:&Arr<T>,i:i64,v:T)->Result<(),i32>{let j=index(a.len,i)?; unsafe{*a.ptr.add(j)=v;} Ok(())}
+fn put2_par<T:Copy>(a:&Arr<T>,i:i64,k:i64,v:T)->Result<(),i32>{
+    let r=index(a.rows,i)?; let c=index(a.cols,k)?; unsafe{*a.ptr.add(r*a.cols+c)=v;} Ok(())
+}
+fn put2<T:Copy>(a:&mut Arr<T>,i:i64,k:i64,v:T)->Result<(),i32>{
+    let r=index(a.rows,i)?; let c=index(a.cols,k)?; a.write(r*a.cols+c,v); Ok(())
+}
+fn into_raw<T:Copy>(a:Arr<T>)->(*mut T,usize){
+    let b=a.owned.into_boxed_slice(); let n=b.len(); (Box::into_raw(b) as *mut T,n)
+}
+#[no_mangle] pub unsafe extern "C" fn pyrust_free_f64(p:*mut f64,n:usize){
+    if !p.is_null() {drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p,n)));}
+}
+#[no_mangle] pub unsafe extern "C" fn pyrust_free_i64(p:*mut i64,n:usize){
+    if !p.is_null() {drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p,n)));}
+}
 fn floor_div(a:i64,b:i64)->Result<i64,i32>{
     if b==0 {return Err(2)}
     let a=a as i128; let b=b as i128;
@@ -121,6 +259,7 @@ fn to_int(x:f64)->Result<i64,i32>{
     let t=x.trunc();
     if t>=-9223372036854775808.0 && t<9223372036854775808.0 {Ok(t as i64)} else {Err(1)}
 }
+fn round_int(x:f64)->Result<i64,i32>{to_int(x.round_ties_even())}
 fn math1(x:f64,r:f64)->Result<f64,i32>{
     // CPython math_1: NaN from a non-NaN input is a domain error, and an
     // infinite result from a finite input is a domain or overflow error.
@@ -128,30 +267,102 @@ fn math1(x:f64,r:f64)->Result<f64,i32>{
     if r.is_infinite() && x.is_finite() {return Err(6)}
     Ok(r)
 }
-fn index(len:usize,i:i64)->Result<usize,i32>{
-    let j=if i<0 {(len as i128)+(i as i128)} else {i as i128};
-    if j<0 || j>=len as i128 {Err(3)} else {Ok(j as usize)}
+fn m_atan2(y:f64,x:f64)->f64{
+    // CPython m_atan2: C99 special cases fixed in Python itself, then libm.
+    const PI:f64=std::f64::consts::PI;
+    if x.is_nan() || y.is_nan() {return f64::NAN}
+    if y.is_infinite() {
+        if x.is_infinite() {
+            return if (1.0f64).copysign(x)==1.0 {(0.25*PI).copysign(y)} else {(0.75*PI).copysign(y)};
+        }
+        return (0.5*PI).copysign(y);
+    }
+    if x.is_infinite() || y==0.0 {
+        return if (1.0f64).copysign(x)==1.0 {(0.0f64).copysign(y)} else {PI.copysign(y)};
+    }
+    y.atan2(x)
 }
-fn at<T:Copy>(a:&[T],i:i64)->Result<T,i32>{Ok(a[index(a.len(),i)?])}
-fn put<T:Copy>(a:&mut [T],i:i64,v:T)->Result<(),i32>{let j=index(a.len(),i)?; a[j]=v; Ok(())}
-fn cmp_if(i:i64,f:f64)->i8{
-    // Exact int-vs-float comparison like CPython: -1 less, 0 equal, 1 greater, 2 NaN.
-    if f.is_nan() {return 2}
-    if f>=9223372036854775808.0 {return -1}
-    if f< -9223372036854775808.0 {return 1}
-    let t=f.trunc(); let ti=t as i64;
-    if i<ti {-1} else if i>ti {1} else {let r=f-t; if r>0.0 {-1} else if r<0.0 {1} else {0}}
+fn m_fmod(x:f64,y:f64)->Result<f64,i32>{
+    // CPython math.fmod
+    if y.is_infinite() && x.is_finite() {return Ok(x)}
+    let r=x%y;
+    if r.is_nan() && !x.is_nan() && !y.is_nan() {return Err(6)}
+    Ok(r)
 }
-fn tick(fuel:&mut u64)->Result<(),i32>{if *fuel==0 {Err(4)} else {*fuel-=1;Ok(())}}
-'''
+fn cmp_if(i:i64,f:f64)->Result<i8,i32>{
+    // int vs float, -1 less, 0 equal, 1 greater, 2 NaN. Exact for |i| <= 2**53, where
+    // CPython (exact) and NumPy scalars (convert the int) agree; larger ints replay.
+    const LIM:i64=1i64<<53;
+    if i< -LIM || i>LIM {return Err(6)}
+    if f.is_nan() {return Ok(2)}
+    let g=i as f64;
+    Ok(if g<f {-1} else if g>f {1} else {0})
+}
+fn sum_f(a:&Arr<f64>,c:&mut Ctx)->Result<f64,i32>{
+    if a.len==0 {return Err(6)}  // Python's sum() of an empty array is the int 0
+    let mut s=0.0f64;
+    for j in 0..a.len {tick(c)?; s+=unsafe{*a.ptr.add(j)};}
+    Ok(s)
+}
+fn sum_i(a:&Arr<i64>,c:&mut Ctx)->Result<i64,i32>{
+    let mut s=0i64;
+    for j in 0..a.len {tick(c)?; s=s.checked_add(unsafe{*a.ptr.add(j)}).ok_or(1)?;}
+    Ok(s)
+}
+"""
 
 # math functions with one float argument and a float result (CPython math_1 rules).
-MATH_FLOAT = {'sqrt':'sqrt','exp':'exp','log':'ln','log2':'log2','log10':'log10','sin':'sin',
-              'cos':'cos','tan':'tan','asin':'asin','acos':'acos','atan':'atan',
-              'sinh':'sinh','cosh':'cosh','tanh':'tanh'}
-MATH_CONSTANTS = {'pi','e','tau','inf','nan'}
+MATH_FLOAT = {
+    'sqrt': 'sqrt',
+    'exp': 'exp',
+    'log': 'ln',
+    'log2': 'log2',
+    'log10': 'log10',
+    'sin': 'sin',
+    'cos': 'cos',
+    'tan': 'tan',
+    'asin': 'asin',
+    'acos': 'acos',
+    'atan': 'atan',
+    'sinh': 'sinh',
+    'cosh': 'cosh',
+    'tanh': 'tanh',
+}
+MATH_OTHER = ('floor', 'ceil', 'trunc', 'fabs', 'isnan', 'isinf', 'isfinite', 'atan2', 'copysign', 'fmod', 'hypot')
+MATH_CONSTANTS = {'pi', 'e', 'tau', 'inf', 'nan'}
 # Builtins the compiler understands, checked again at call time in case they are rebound.
-KNOWN_BUILTINS = {'range','len','float','int','abs','min','max','pow'}
+KNOWN_BUILTINS = {
+    'range',
+    'len',
+    'float',
+    'int',
+    'abs',
+    'min',
+    'max',
+    'pow',
+    'sum',
+    'round',
+    'divmod',
+    'enumerate',
+    'bool',
+}
+NUMPY_MAKERS = {'zeros': 0, 'empty': 0, 'ones': 1, 'zeros_like': 0, 'empty_like': 0, 'ones_like': 1}
+
+HINTS = [
+    (
+        'List',
+        "Lists aren't compiled. Pass a NumPy array (F64Array / I64Array), create one with np.zeros(n), "
+        'or use separate variables.',
+    ),
+    ('ListComp', "List comprehensions aren't compiled. Write a loop that fills an array from np.zeros(n)."),
+    ('GeneratorExp', "Generator expressions aren't compiled. Write a loop that adds to a total."),
+    ('Dict', "Dicts aren't compiled. Move dict work outside the decorated function."),
+    ('Set', "Sets aren't compiled. Move set work outside the decorated function."),
+    ('JoinedStr', "Strings aren't compiled. Format text outside the decorated function."),
+    ('Lambda', "Lambdas aren't compiled. Use a plain module-level function instead."),
+    ('With', "`with` blocks aren't compiled. Keep I/O and context managers outside the decorated function."),
+    ('Try', "`try` blocks aren't compiled. Errors in compiled code replay in Python, so handle them in the caller."),
+]
 
 
 def float_literal(value):
@@ -160,6 +371,59 @@ def float_literal(value):
     if math.isinf(value):
         return '(f64::INFINITY)' if value > 0 else '(f64::NEG_INFINITY)'
     return f'({value!r}f64)'
+
+
+def tuple_kind(kinds):
+    return 'tuple(' + ','.join(kinds) + ')'
+
+
+def tuple_parts(kind):
+    return kind[6:-1].split(',') if kind.startswith('tuple(') else None
+
+
+def rust_type(kind):
+    if kind in ARRAY_INFO:
+        return f'Arr<{ARRAY_INFO[kind][0]}>'
+    parts = tuple_parts(kind)
+    if parts:
+        return '(' + ','.join(RUST_TYPE[p] for p in parts) + ')'
+    return RUST_TYPE[kind]
+
+
+def kind_of_value(value):
+    """Native kind for a Python argument value, or None if it must run as Python."""
+    t = type(value)
+    if t is int:
+        return 'i64' if -(2**63) <= value < 2**63 else None
+    if t is float:
+        return 'f64'
+    if t is bool:
+        return 'bool'
+    np = sys.modules.get('numpy')
+    if np is not None and t is np.ndarray and value.ndim in (1, 2):
+        if value.dtype == np.float64:
+            return 'array' if value.ndim == 1 else 'array2'
+        if value.dtype == np.int64:
+            return 'iarray' if value.ndim == 1 else 'iarray2'
+    return None
+
+
+def default_kinds(function):
+    """Kinds from annotations (unannotated parameters are int)."""
+    kinds = {}
+    for name, p in inspect.signature(function).parameters.items():
+        annotation = p.annotation
+        if annotation is inspect.Parameter.empty:
+            kinds[name] = 'i64'
+        else:
+            try:
+                kinds[name] = ANNOTATIONS[annotation]
+            except (KeyError, TypeError):
+                raise Unsupported(
+                    f'{function.__name__}: unsupported annotation for {name}: {annotation!r} '
+                    '(use int, float, bool, F64Array, I64Array, F64Array2 or I64Array2)'
+                ) from None
+    return kinds
 
 
 def _resolve_callee(obj):
@@ -173,7 +437,7 @@ def _resolve_callee(obj):
 
 
 class Compiler:
-    def __init__(self, function, max_iterations=10_000_000, _program=None):
+    def __init__(self, function, max_iterations=10_000_000, _program=None, kinds=None):
         if hasattr(function, '__wrapped__'):
             raise Unsupported('Wrapped functions are not supported')
         self.function = function
@@ -183,53 +447,63 @@ class Compiler:
         if not isinstance(self.node, ast.FunctionDef) or function.__closure__:
             raise Unsupported('Only ordinary functions without closure capture are supported')
         self.signature = inspect.signature(function)
-        self.types = {}
         for name, p in self.signature.parameters.items():
             if p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
                 raise Unsupported(f'{function.__name__}: *args, **kwargs and keyword-only parameters are unsupported')
-            annotation = p.annotation
-            if annotation in (inspect.Parameter.empty, int, 'int'):
-                kind = 'i64'
-            elif annotation in (float, 'float'):
-                kind = 'f64'
-            elif annotation in (F64Array, 'F64Array'):
-                kind = 'array'
-            elif annotation in (I64Array, 'I64Array'):
-                kind = 'iarray'
-            else:
-                raise Unsupported(f'{function.__name__}: unsupported annotation for {name}: {annotation!r} '
-                                  '(use int, float, F64Array or I64Array)')
-            self.types[name] = kind
+        self.params = list(self.signature.parameters)
+        self.types = dict(kinds) if kinds is not None else default_kinds(function)
         self.globals = function.__globals__
         ns = function.__builtins__
         self.builtins_ns = ns if isinstance(ns, dict) else vars(ns)
-        self.names = {p: f'v{i}' for i,p in enumerate(self.types)}
+        self.names = {p: f'v{i}' for i, p in enumerate(self.params)}
         self.assigned = set(self.names)
-        self.local_names = set(self.names) | {n.id for n in ast.walk(self.node)
-                                             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        self.local_names = set(self.names) | {
+            n.id for n in ast.walk(self.node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        }
         targets = []
         for node in ast.walk(self.node):
             if isinstance(node, ast.Assign):
                 targets += node.targets
             elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
                 targets.append(node.target)
-        self.written = {t.value.id for t in targets if isinstance(t, ast.Subscript)
-                        and isinstance(t.value, ast.Name) and self.types.get(t.value.id) in ARRAY_KINDS}
+        self.written = set()
+        for t in targets:
+            base = t.value if isinstance(t, ast.Subscript) else None
+            if isinstance(base, ast.Subscript):  # a[i][j] = v
+                base = base.value
+            if isinstance(base, ast.Name) and self.types.get(base.id) in ARRAY_KINDS:
+                self.written.add(base.id)
         returns = self.signature.return_annotation
-        self.declared_return = {int:'i64','int':'i64',float:'f64','float':'f64',None:'none','None':'none'}.get(
-            returns if isinstance(returns, (str, type)) or returns is None else object())
+        try:
+            self.declared_return = RETURN_ANNOTATIONS.get(returns)
+        except TypeError:
+            self.declared_return = None
+        self.local_arrays = set()
         self.used_builtins = set()
         self.counter = 0
         self.loop_depth = 0
+        self.parallel = None  # info about the prange loop being compiled, if any
         self.return_type = None
         self.max_iterations = max_iterations
         # Shared by every function compiled into one library.
-        self.program = _program if _program is not None else {
-            'functions': [], 'index': {}, 'stack': [], 'guards': {}, 'code_guards': {}, 'callees': [],
-            'recursive': {}}
+        self.program = (
+            _program
+            if _program is not None
+            else {
+                'functions': [],
+                'index': {},
+                'stack': [],
+                'guards': {},
+                'code_guards': {},
+                'callees': [],
+                'recursive': {},
+                'next': 0,
+                'parallel': False,
+            }
+        )
 
     # ------------------------------------------------------------ diagnostics
-    def fail(self, node, message):
+    def fail(self, node, message, hint=None):
         line = self.first_line + getattr(node, 'lineno', 1) - 1
         try:
             snippet = ast.unparse(node)
@@ -237,13 +511,25 @@ class Compiler:
             snippet = type(node).__name__
         if len(snippet) > 60:
             snippet = snippet[:57] + '...'
-        raise Unsupported(f'{self.function.__name__}, line {line}: {message}: `{snippet}`')
+        if hint is None:
+            for sub in ast.walk(node):
+                hint = next((h for name, h in HINTS if type(sub).__name__ == name), None)
+                if hint:
+                    break
+            if hint is None and isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+                hint = dict(HINTS)['JoinedStr']
+        text = f'{self.function.__name__}, line {line}: {message}: `{snippet}`'
+        raise Unsupported(text + (f'\n  hint: {hint}' if hint else ''))
 
     # ---------------------------------------------------------------- helpers
     def name(self, name):
         if name not in self.names:
             self.names[name] = f'v{len(self.names)}'
         return self.names[name]
+
+    def temp(self, prefix='t'):
+        self.counter += 1
+        return f'{prefix}{self.counter}'
 
     def guard(self, name, expected):
         """Record that global/builtin `name` must still be `expected` at call time."""
@@ -261,72 +547,246 @@ class Compiler:
         self.guard(name, getattr(builtins, name))
 
     def is_builtin(self, name):
-        return (name in KNOWN_BUILTINS and name not in self.local_names
-                and self.lookup(name) is getattr(builtins, name))
+        return name in KNOWN_BUILTINS and name not in self.local_names and self.lookup(name) is getattr(builtins, name)
+
+    def is_prange(self, func):
+        if not isinstance(func, ast.Name) or func.id in self.local_names:
+            return False
+        obj = self.lookup(func.id)
+        if obj is prange:
+            self.guard(func.id, obj)
+            return True
+        return False
+
+    def numpy_module(self, node):
+        """The numpy module if `node` is a global name bound to it, else None."""
+        np = sys.modules.get('numpy')
+        if (
+            np is not None
+            and isinstance(node, ast.Name)
+            and node.id not in self.local_names
+            and self.lookup(node.id) is np
+        ):
+            self.guard(node.id, np)
+            return np
+        return None
 
     def math_name(self, func):
         """'sqrt' for math.sqrt(...) or a `from math import sqrt` name; else None."""
-        if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                and func.value.id not in self.local_names and self.lookup(func.value.id) is math):
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id not in self.local_names
+            and self.lookup(func.value.id) is math
+        ):
             self.guard(func.value.id, math)
             return func.attr
         if isinstance(func, ast.Name) and func.id not in self.local_names:
             obj = self.lookup(func.id)
-            for attr in (*MATH_FLOAT, 'floor', 'ceil', 'fabs', 'isnan', 'isinf', 'isfinite', 'trunc'):
-                if obj is getattr(math, attr):
+            for attr in (*MATH_FLOAT, *MATH_OTHER):
+                if obj is getattr(math, attr, None):
                     self.guard(func.id, obj)
                     return attr
         return None
 
     def expect(self, node, kind):
         value, actual = self.expr(node)
+        if actual == 'bool' and kind == 'i64':
+            return f'({value} as i64)'
         if actual != kind:
             self.fail(node, f'expected {kind}, got {actual}')
         return value
 
     def scalar(self, node):
+        """int or float value; bools are promoted to int like Python does in arithmetic."""
         value, kind = self.expr(node)
+        if kind == 'bool':
+            return f'({value} as i64)', 'i64'
         if kind not in ('i64', 'f64'):
             self.fail(node, 'expected an int or float value')
         return value, kind
 
-    def array(self, node):
-        value, kind = self.expr(node)
-        if kind not in ARRAY_KINDS:
-            self.fail(node, 'expected an F64Array or I64Array parameter')
-        return value, kind
-
-    def element(self, sub):
-        """Read array[index] -> (rust, element kind)."""
-        a, kind = self.array(sub.value)
-        i = self.expect(sub.slice, 'i64')
-        return f'at(&*{a},{i})?', ELEMENT[kind]
-
     def as_float(self, node):
         value, kind = self.scalar(node)
-        return (f'({value} as f64)' if kind == 'i64' else value)
+        return f'({value} as f64)' if kind == 'i64' else value
+
+    # ----------------------------------------------------------------- arrays
+    def array(self, node):
+        """(name, kind) of an array parameter or local array."""
+        if isinstance(node, ast.Name) and node.id in self.assigned and self.types.get(node.id) in ARRAY_KINDS:
+            return node.id, self.types[node.id]
+        self.fail(node, 'expected a NumPy array parameter or a local array from np.zeros(...)')
+
+    def aref(self, name):
+        if self.parallel is not None and name in self.parallel['arrays']:
+            return f'&*{self.name(name)}_r'
+        return f'&*{self.name(name)}' if name in self.params else f'&{self.name(name)}'
+
+    def amut(self, name, node):
+        if self.parallel is not None:
+            self.fail(
+                node,
+                'inside prange, arrays can only be written with out[i] = ...',
+                'Called functions cannot write arrays inside prange.',
+            )
+        if name in self.params:
+            if name not in self.written:
+                self.written.add(name)
+            return f'&mut *{self.name(name)}'
+        return f'&mut {self.name(name)}'
+
+    def indices(self, sub):
+        """(array name, kind, [index exprs]) for a[i], a[i, j] or a[i][j]."""
+        node = sub.slice
+        if isinstance(sub.value, ast.Subscript) and not isinstance(node, ast.Tuple):
+            name, kind = self.array(sub.value.value)  # a[i][j]
+            self.check_parallel_index(sub, name, sub.value.slice)
+            if ARRAY_INFO[kind][1] != 2:
+                self.fail(sub, 'a[i][j] needs a 2-D array')
+            return name, kind, [self.expect(sub.value.slice, 'i64'), self.expect(node, 'i64')]
+        name, kind = self.array(sub.value)
+        self.check_parallel_index(sub, name, node)
+        dims = ARRAY_INFO[kind][1]
+        if isinstance(node, ast.Slice) or (
+            isinstance(node, ast.Tuple) and any(isinstance(e, ast.Slice) for e in node.elts)
+        ):
+            self.fail(
+                sub,
+                'array slices are not compiled',
+                'Loop over indices instead of slicing, e.g. for i in range(start, stop): ... a[i] ...',
+            )
+        parts = node.elts if isinstance(node, ast.Tuple) else [node]
+        if len(parts) != dims:
+            self.fail(sub, f'this array has {dims} dimension(s); index it with {dims} index(es)')
+        return name, kind, [self.expect(p, 'i64') for p in parts]
+
+    def check_parallel_index(self, sub, name, index):
+        """Inside prange, arrays that the loop writes may only be touched at the loop index."""
+        if self.parallel is None or name not in self.parallel['writes']:
+            return
+        first = index.elts[0] if isinstance(index, ast.Tuple) and index.elts else index
+        if not (isinstance(first, ast.Name) and first.id == self.parallel['var']):
+            self.fail(
+                sub,
+                f'inside prange, {name!r} is written, so it may only be used at the loop index '
+                f'({name}[{self.parallel["var"]}])',
+                'Other iterations run at the same time, so reading their elements would not match Python.',
+            )
+
+    def element(self, sub):
+        name, kind, idx = self.indices(sub)
+        fn = 'at' if len(idx) == 1 else 'at2'
+        return f'{fn}({self.aref(name)},{",".join(idx)})?', ELEMENT[kind]
+
+    def shape(self, node):
+        """a.shape -> tuple kind value."""
+        name, kind = self.array(node.value)
+        ref = self.aref(name)
+        if ARRAY_INFO[kind][1] == 1:
+            return f'(({ref}).len as i64,)', 'tuple(i64)'
+        return f'(({ref}).rows as i64, ({ref}).cols as i64)', 'tuple(i64,i64)'
+
+    def numpy_maker(self, n):
+        """np.zeros(n) / np.empty((r, c)) / np.ones(n, dtype=np.int64) / np.zeros_like(a) -> new array."""
+        np = self.numpy_module(n.func.value)
+        attr = n.func.attr
+        fill = NUMPY_MAKERS[attr]
+        dtype = None
+        for kw in n.keywords:
+            if kw.arg != 'dtype':
+                self.fail(n, f'only the dtype= keyword is supported for np.{attr}')
+            target = kw.value
+            if isinstance(target, ast.Name) and target.id in ('float', 'int') and self.is_builtin(target.id):
+                dtype = 'f64' if target.id == 'float' else 'i64'
+                self.builtin(target.id)
+            elif (
+                isinstance(target, ast.Attribute)
+                and self.numpy_module(target.value) is np
+                and target.attr in ('float64', 'int64', 'double')
+            ):
+                dtype = 'i64' if target.attr == 'int64' else 'f64'
+            else:
+                self.fail(kw.value, 'dtype must be float, int, np.float64 or np.int64')
+        if len(n.args) != 1:
+            self.fail(n, f'np.{attr} takes one shape argument here')
+        if attr.endswith('_like'):
+            name, kind = self.array(n.args[0])
+            element = dtype or ELEMENT[kind]
+            ref = self.aref(name)
+            rows, cols = f'(({ref}).rows as i64)', f'(({ref}).cols as i64)'
+            dims = ARRAY_INFO[kind][1]
+        else:
+            element = dtype or 'f64'
+            shape = n.args[0]
+            if isinstance(shape, ast.Tuple) and len(shape.elts) == 2:
+                rows, cols = self.expect(shape.elts[0], 'i64'), self.expect(shape.elts[1], 'i64')
+                dims = 2
+            elif isinstance(shape, ast.Tuple) and len(shape.elts) == 1:
+                rows, cols, dims = self.expect(shape.elts[0], 'i64'), '1i64', 1
+            elif isinstance(shape, ast.Tuple):
+                self.fail(n, 'only 1-D and 2-D arrays are compiled')
+            else:
+                rows, cols, dims = self.expect(shape, 'i64'), '1i64', 1
+        kind = {('f64', 1): 'array', ('i64', 1): 'iarray', ('f64', 2): 'array2', ('i64', 2): 'iarray2'}[element, dims]
+        literal = ('1.0' if fill else '0.0') if element == 'f64' else ('1' if fill else '0')
+        return f'Arr::<{element}>::owned({rows},{cols},{literal}{element})?', kind
 
     # ------------------------------------------------------------ expressions
     def expr(self, n):
         if isinstance(n, ast.Constant):
+            if type(n.value) is bool:
+                return ('true' if n.value else 'false'), 'bool'
             if type(n.value) is int and -(2**63) <= n.value < 2**63:
                 return f'({n.value}i64)', 'i64'
             if type(n.value) is float and math.isfinite(n.value):
                 return float_literal(n.value), 'f64'
-            self.fail(n, 'only int and float constants are supported')
+            self.fail(n, 'only int, float and bool constants are supported')
         if isinstance(n, ast.Name):
+            if self.parallel is not None and n.id in self.parallel['reductions']:
+                self.fail(n, f'inside prange, the total {n.id!r} can only be added to, not read')
             if n.id in self.assigned:
                 return self.name(n.id), self.types[n.id]
             if n.id not in self.local_names:
                 return self.global_constant(n)
-            self.fail(n, 'variable may be used before it is assigned')
+            self.fail(
+                n,
+                'variable may be used before it is assigned',
+                'Give it a value before the loop or if statement, for example total = 0.0.',
+            )
         if isinstance(n, ast.Attribute):
-            if (isinstance(n.value, ast.Name) and n.value.id not in self.local_names
-                    and self.lookup(n.value.id) is math and n.attr in MATH_CONSTANTS):
+            if (
+                isinstance(n.value, ast.Name)
+                and n.value.id not in self.local_names
+                and self.lookup(n.value.id) is math
+                and n.attr in MATH_CONSTANTS
+            ):
                 self.guard(n.value.id, math)
                 return float_literal(getattr(math, n.attr)), 'f64'
-            self.fail(n, 'unsupported attribute')
+            if n.attr == 'shape':
+                return self.shape(n)
+            if n.attr == 'size':
+                name, _ = self.array(n.value)
+                return f'(({self.aref(name)}).len as i64)', 'i64'
+            self.fail(
+                n,
+                'unsupported attribute',
+                'Only math.* constants and functions, array .shape and '
+                '.size, and np.zeros/np.empty/np.ones are compiled.',
+            )
+        if isinstance(n, ast.Subscript):
+            if isinstance(n.value, ast.Attribute) and n.value.attr == 'shape':
+                value, kind = self.shape(n.value)
+                if not (isinstance(n.slice, ast.Constant) and type(n.slice.value) is int):
+                    self.fail(n, 'index .shape with a constant, like a.shape[0]')
+                parts = tuple_parts(kind)
+                i = n.slice.value
+                if not -len(parts) <= i < len(parts):
+                    self.fail(n, 'shape index out of range')
+                return f'({value}.{i % len(parts)})', 'i64'
+            return self.element(n)
         if isinstance(n, ast.UnaryOp):
+            if isinstance(n.op, ast.Not):
+                return f'(!({self.condition(n.operand)}))', 'bool'
             if isinstance(n.op, ast.USub):
                 # AST represents -2**63 as unary minus applied to the positive literal.
                 if isinstance(n.operand, ast.Constant) and type(n.operand.value) is int and n.operand.value == 2**63:
@@ -342,21 +802,45 @@ class Compiler:
                 return f'(!({self.expect(n.operand, "i64")}))', 'i64'
         if isinstance(n, ast.BinOp):
             return self.binop(n, n.left, n.op, n.right)
+        if isinstance(n, ast.Compare):
+            return f'({self.condition(n)})', 'bool'
+        if isinstance(n, ast.BoolOp):
+            values = [self.expr(v) for v in n.values]
+            if any(k != 'bool' for _, k in values):
+                self.fail(
+                    n,
+                    '`and` / `or` between non-bool values returns one of the values in Python',
+                    'Use it inside an if/while condition, or compare first: (a > 0) and (b > 0).',
+                )
+            op = ' && ' if isinstance(n.op, ast.And) else ' || '
+            return '(' + op.join(f'({v})' for v, _ in values) + ')', 'bool'
         if isinstance(n, ast.IfExp):
             cond = self.condition(n.test)
             a, ta = self.expr(n.body)
             b, tb = self.expr(n.orelse)
-            if ta != tb or ta in ARRAY_KINDS:
-                self.fail(n, 'both branches of `x if c else y` must have the same scalar type')
+            if ta != tb or ta not in SCALARS:
+                self.fail(
+                    n,
+                    'both branches of `x if c else y` must have the same type',
+                    'Use 0.0 instead of 0 (or the other way round) so both branches match.',
+                )
             return f'(if {cond} {{ {a} }} else {{ {b} }})', ta
+        if isinstance(n, ast.Tuple):
+            values = [self.expr(e) for e in n.elts]
+            if not values or any(k not in SCALARS for _, k in values):
+                self.fail(n, 'only tuples of int, float and bool values are compiled')
+            return '(' + ', '.join(v for v, _ in values) + (',' if len(values) == 1 else '') + ')', tuple_kind(
+                [k for _, k in values]
+            )
         if isinstance(n, ast.Call):
-            if n.keywords:
-                self.fail(n, 'keyword arguments in calls are unsupported')
             return self.call(n)
         self.fail(n, 'unsupported expression')
 
     def global_constant(self, n):
         value = self.lookup(n.id)
+        if type(value) is bool:
+            self.guard(n.id, value)
+            return ('true' if value else 'false'), 'bool'
         if type(value) is int and -(2**63) <= value < 2**63:
             self.guard(n.id, value)
             return f'({value}i64)', 'i64'
@@ -365,22 +849,38 @@ class Compiler:
             return float_literal(value), 'f64'
         if value is _MISSING:
             self.fail(n, f'name {n.id!r} is not defined')
-        self.fail(n, f'global {n.id!r} must be an int or float constant')
+        self.fail(n, f'global {n.id!r} must be an int, float or bool constant')
 
     def binop(self, n, left, op, right):
         a, ta = self.expr(left)
         b, tb = self.expr(right)
-        if ta in ARRAY_KINDS or tb in ARRAY_KINDS:
-            self.fail(n, 'read array elements with float(a[i]) or int(a[i])')
+        for k, side in ((ta, left), (tb, right)):
+            if k not in SCALARS:
+                self.fail(
+                    side,
+                    'only int, float and bool values can be used in arithmetic',
+                    "Read array elements with a[i]; arrays themselves aren't combined.",
+                )
+        if ta == tb == 'bool' and isinstance(op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+            return f'(({a}) {({ast.BitAnd: "&", ast.BitOr: "|", ast.BitXor: "^"})[type(op)]} ({b}))', 'bool'
+        if ta == 'bool':
+            a, ta = f'({a} as i64)', 'i64'
+        if tb == 'bool':
+            b, tb = f'({b} as i64)', 'i64'
         if ta == tb == 'i64':
-            checked = {ast.Add:'checked_add',ast.Sub:'checked_sub',ast.Mult:'checked_mul'}.get(type(op))
+            checked = {ast.Add: 'checked_add', ast.Sub: 'checked_sub', ast.Mult: 'checked_mul'}.get(type(op))
             if checked:
                 return f'({a}).{checked}({b}).ok_or(1)?', 'i64'
-            helper = {ast.FloorDiv:'floor_div',ast.Mod:'modulo',ast.Pow:'int_pow',
-                      ast.LShift:'shift_left',ast.RShift:'shift_right'}.get(type(op))
+            helper = {
+                ast.FloorDiv: 'floor_div',
+                ast.Mod: 'modulo',
+                ast.Pow: 'int_pow',
+                ast.LShift: 'shift_left',
+                ast.RShift: 'shift_right',
+            }.get(type(op))
             if helper:
                 return f'{helper}({a},{b})?', 'i64'
-            bitwise = {ast.BitAnd:'&',ast.BitOr:'|',ast.BitXor:'^'}.get(type(op))
+            bitwise = {ast.BitAnd: '&', ast.BitOr: '|', ast.BitXor: '^'}.get(type(op))
             if bitwise:
                 return f'(({a}) {bitwise} ({b}))', 'i64'
             if isinstance(op, ast.Div):
@@ -388,74 +888,131 @@ class Compiler:
         else:
             a = f'({a} as f64)' if ta == 'i64' else a
             b = f'({b} as f64)' if tb == 'i64' else b
-            symbol = {ast.Add:'+',ast.Sub:'-',ast.Mult:'*'}.get(type(op))
+            symbol = {ast.Add: '+', ast.Sub: '-', ast.Mult: '*'}.get(type(op))
             if symbol:
                 return f'(({a}) {symbol} ({b}))', 'f64'
-            helper = {ast.Div:'divide',ast.FloorDiv:'float_floor_div',ast.Mod:'float_mod',
-                      ast.Pow:'float_pow'}.get(type(op))
+            helper = {
+                ast.Div: 'divide',
+                ast.FloorDiv: 'float_floor_div',
+                ast.Mod: 'float_mod',
+                ast.Pow: 'float_pow',
+            }.get(type(op))
             if helper:
                 return f'{helper}({a},{b})?', 'f64'
         self.fail(n, f'unsupported operator for {ta} and {tb}')
 
     def call(self, n):
         func, args = n.func, n.args
+        if isinstance(func, ast.Attribute) and func.attr in NUMPY_MAKERS and self.numpy_module(func.value) is not None:
+            return self.numpy_maker(n)
+        if n.keywords and not (
+            isinstance(func, ast.Name) and not self.is_builtin(func.id) and self.math_name(func) is None
+        ):
+            self.fail(
+                n,
+                'keyword arguments are only supported in calls to your own functions and np.zeros(..., dtype=...)',
+                'Pass the arguments by position.',
+            )
         math_attr = self.math_name(func)
         if math_attr is not None:
-            if len(args) != 1:
-                self.fail(n, f'math.{math_attr} takes one argument here')
-            if math_attr in MATH_FLOAT:
-                x = self.as_float(args[0])
-                self.counter += 1
-                t = f'm{self.counter}'
-                return f'({{ let {t}: f64 = {x}; math1({t},{t}.{MATH_FLOAT[math_attr]}())? }})', 'f64'
-            if math_attr == 'fabs':
-                return f'(({self.as_float(args[0])}).abs())', 'f64'
-            if math_attr in ('floor', 'ceil', 'trunc'):
-                value, kind = self.scalar(args[0])
-                if kind == 'i64':
-                    return f'({value})', 'i64'
-                return f'to_int(({value}).{math_attr}())?', 'i64'
-            self.fail(n, f'math.{math_attr} returns a bool; use it in a condition')
+            return self.math_call(n, math_attr, args)
         if not isinstance(func, ast.Name):
-            self.fail(n, 'only calls to builtins, math functions and plain functions are supported')
+            self.fail(
+                n,
+                'only calls to builtins, math functions, np.zeros/empty/ones and plain functions are supported',
+                "Method calls and calls through objects aren't compiled.",
+            )
         name = func.id
         if name in self.local_names:
             self.fail(n, f'{name!r} is a local variable, not a function')
         if self.is_builtin(name):
             return self.builtin_call(n, name, args)
+        if name == 'print' and self.lookup(name) is builtins.print:
+            self.fail(
+                n,
+                'print() is not compiled',
+                'Remove print() from the hot function, or print the returned value afterwards.',
+            )
         callee = _resolve_callee(self.lookup(name))
         if callee is not None:
-            return self.user_call(n, name, callee, args)
+            return self.user_call(n, name, callee)
         self.fail(n, f'call to {name!r} is unsupported')
+
+    def math_call(self, n, attr, args):
+        if attr == 'hypot':
+            self.fail(
+                n,
+                'math.hypot is not compiled: CPython uses its own algorithm that can differ from '
+                'the C library in the last digit',
+                'If that difference is fine for you, write math.sqrt(x * x + y * y).',
+            )
+        if attr in ('atan2', 'copysign', 'fmod'):
+            if len(args) != 2:
+                self.fail(n, f'math.{attr} takes two arguments')
+            x, y = self.as_float(args[0]), self.as_float(args[1])
+            if attr == 'atan2':
+                return f'm_atan2({x},{y})', 'f64'
+            if attr == 'copysign':
+                return f'(({x}).copysign({y}))', 'f64'
+            return f'm_fmod({x},{y})?', 'f64'
+        if len(args) != 1:
+            self.fail(n, f'math.{attr} takes one argument here')
+        if attr in MATH_FLOAT:
+            x = self.as_float(args[0])
+            t = self.temp('m')
+            return f'({{ let {t}: f64 = {x}; math1({t},{t}.{MATH_FLOAT[attr]}())? }})', 'f64'
+        if attr == 'fabs':
+            return f'(({self.as_float(args[0])}).abs())', 'f64'
+        if attr in ('floor', 'ceil', 'trunc'):
+            value, kind = self.scalar(args[0])
+            if kind == 'i64':
+                return f'({value})', 'i64'
+            return f'to_int(({value}).{attr}())?', 'i64'
+        if attr in ('isnan', 'isinf', 'isfinite'):
+            x = self.as_float(args[0])
+            method = {'isnan': 'is_nan', 'isinf': 'is_infinite', 'isfinite': 'is_finite'}[attr]
+            return f'(({x}).{method}())', 'bool'
+        self.fail(n, f'math.{attr} is not compiled')
 
     def builtin_call(self, n, name, args):
         self.builtin(name)
         if name == 'len' and len(args) == 1:
-            a, _ = self.array(args[0])
-            return f'({a}.len() as i64)', 'i64'
+            arr, _ = self.array(args[0])
+            return f'(({self.aref(arr)}).rows as i64)', 'i64'
         if name == 'float' and len(args) == 1:
-            arg = args[0]
-            if isinstance(arg, ast.Subscript):
-                value, kind = self.element(arg)
-                return (value if kind == 'f64' else f'({value} as f64)'), 'f64'
-            return self.as_float(arg), 'f64'
+            return self.as_float(args[0]), 'f64'
         if name == 'int' and len(args) == 1:
-            if isinstance(args[0], ast.Subscript):
-                value, kind = self.element(args[0])
-                return (value, 'i64') if kind == 'i64' else (f'to_int({value})?', 'i64')
             value, kind = self.scalar(args[0])
             return (f'({value})', 'i64') if kind == 'i64' else (f'to_int({value})?', 'i64')
+        if name == 'bool' and len(args) == 1:
+            value, kind = self.expr(args[0])
+            if kind == 'bool':
+                return value, 'bool'
+            return f'({self.condition(args[0])})', 'bool'
         if name == 'abs' and len(args) == 1:
             value, kind = self.scalar(args[0])
             if kind == 'i64':
                 return f'({value}).checked_abs().ok_or(1)?', 'i64'
             return f'(({value}).abs())', 'f64'
+        if name == 'round':
+            if len(args) != 1:
+                self.fail(
+                    n,
+                    'round(x, ndigits) is not compiled',
+                    'round(x) is supported; round to digits outside the decorated function.',
+                )
+            value, kind = self.scalar(args[0])
+            return (f'({value})', 'i64') if kind == 'i64' else (f'round_int({value})?', 'i64')
         if name in ('min', 'max') and len(args) >= 2:
             values = [self.scalar(a) for a in args]
             kinds = {k for _, k in values}
             if len(kinds) != 1:
                 # Python returns whichever argument wins, keeping its own type.
-                self.fail(n, f'{name}() arguments must all be int or all be float')
+                self.fail(
+                    n,
+                    f'{name}() arguments must all be int or all be float',
+                    'Write 0.0 instead of 0 (or float(x)) so every argument is a float.',
+                )
             kind = kinds.pop()
             helper = f'{name}_{"i" if kind == "i64" else "f"}'
             out = values[0][0]
@@ -464,58 +1021,109 @@ class Compiler:
             return out, kind
         if name == 'pow' and len(args) == 2:
             return self.binop(n, args[0], ast.Pow(), args[1])
+        if name == 'sum' and len(args) == 1:
+            arr, kind = self.array(args[0])
+            if ARRAY_INFO[kind][1] != 1:
+                self.fail(n, 'sum() of a 2-D array returns an array; it is not compiled')
+            return (
+                f'sum_f({self.aref(arr)},fuel)?' if ELEMENT[kind] == 'f64' else f'sum_i({self.aref(arr)},fuel)?'
+            ), ELEMENT[kind]
+        if name == 'divmod' and len(args) == 2:
+            a, ta = self.scalar(args[0])
+            b, tb = self.scalar(args[1])
+            t1, t2 = self.temp('d'), self.temp('d')
+            if ta == tb == 'i64':
+                return (
+                    f'({{ let {t1}: i64 = {a}; let {t2}: i64 = {b}; (floor_div({t1},{t2})?, modulo({t1},{t2})?) }})'
+                ), 'tuple(i64,i64)'
+            a = f'({a} as f64)' if ta == 'i64' else a
+            b = f'({b} as f64)' if tb == 'i64' else b
+            return (
+                f'({{ let {t1}: f64 = {a}; let {t2}: f64 = {b}; '
+                f'(float_floor_div({t1},{t2})?, float_mod({t1},{t2})?) }})'
+            ), 'tuple(f64,f64)'
         self.fail(n, f'unsupported use of {name}()')
 
-    def register(self, rust_name):
+    def register(self, rust_name, key):
         """Make this function callable (by recursive calls) before its body is compiled."""
-        params = [self.types[p] for p in self.signature.parameters]
-        self.program['index'][id(self.function)] = (self.function, rust_name, params, self.declared_return)
+        params = [self.types[p] for p in self.params]
+        self.program['index'][key] = (self.function, rust_name, params, self.declared_return, set(self.written))
 
-    def user_call(self, n, name, callee, args):
+    def user_call(self, n, name, callee):
         program = self.program
-        key = id(callee)
-        if callee in program['stack']:
-            entry = program['index'].get(key)
-            if entry is None or entry[3] in (None, 'none'):
-                self.fail(n, f'recursive call to {name!r}: annotate its return type (-> int or -> float)')
+        sig = inspect.signature(callee)
+        cparams = list(sig.parameters)
+        # Bind positional, keyword and default arguments like Python does.
+        bound = {}
+        if len(n.args) > len(cparams):
+            self.fail(n, f'{name}() takes {len(cparams)} arguments')
+        for p, arg in zip(cparams, n.args):
+            bound[p] = arg
+        for kw in n.keywords:
+            if kw.arg is None or kw.arg not in cparams or kw.arg in bound:
+                self.fail(n, f'bad keyword argument for {name}()')
+            bound[kw.arg] = kw.value
+        values, kinds = [], []
+        for p in cparams:
+            if p in bound:
+                if (
+                    isinstance(bound[p], ast.Name)
+                    and self.types.get(bound[p].id) in ARRAY_KINDS
+                    and bound[p].id in self.assigned
+                ):
+                    values.append(('array', bound[p].id))
+                    kinds.append(self.types[bound[p].id])
+                    continue
+                value, kind = self.expr(bound[p])
+                if kind not in SCALARS:
+                    self.fail(bound[p], f'arguments to {name}() must be int, float, bool or arrays')
+                values.append(('value', value))
+                kinds.append(kind)
+            else:
+                default = sig.parameters[p].default
+                if default is inspect.Parameter.empty:
+                    self.fail(n, f'{name}() is missing argument {p!r}')
+                value, kind = self.expr(ast.Constant(value=default))
+                values.append(('value', value))
+                kinds.append(kind)
+        key = (id(callee), tuple(kinds))
+        if callee in program['stack'] and key in program['index']:
+            entry = program['index'][key]
+            if entry[3] in (None, 'none'):
+                self.fail(n, f'recursive call to {name!r}: annotate its return type (-> int, -> float or -> bool)')
             program['recursive'][key] = entry[3]
         elif key not in program['index']:
             program['stack'].append(callee)
             try:
                 try:
-                    sub = Compiler(callee, self.max_iterations, _program=program)
+                    sub = Compiler(callee, self.max_iterations, _program=program, kinds=dict(zip(cparams, kinds)))
                 except Unsupported as exc:
                     raise Unsupported(f'called function {name!r}: {exc}') from None
                 except (OSError, TypeError) as exc:
                     raise Unsupported(f'called function {name!r}: source unavailable ({exc})') from None
-                if sub.written:
-                    self.fail(n, f'called function {name!r} writes to an array; '
-                                 'only the decorated function itself can write arrays')
-                rust_name = f'k{program.setdefault("next", 0)}'
+                rust_name = f'k{program["next"]}'
                 program['next'] += 1
-                sub.register(rust_name)
-                text = sub.function_text(rust_name)
+                sub.register(rust_name, key)
+                text = sub.function_text(rust_name, key)
             finally:
                 program['stack'].pop()
             if sub.return_type == 'none':
                 self.fail(n, f'called function {name!r} does not return a value')
-            params = [sub.types[p] for p in sub.signature.parameters]
-            program['index'][key] = (callee, rust_name, params, sub.return_type)
+            program['index'][key] = (callee, rust_name, kinds, sub.return_type, set(sub.written))
             program['functions'].append(text)
-            program['callees'].append(callee.__qualname__)
-            program['code_guards'][key] = (callee, callee.__code__)
-        _, rust_name, params, return_type = program['index'][key]
+            if callee.__qualname__ not in program['callees']:
+                program['callees'].append(callee.__qualname__)
+            program['code_guards'][id(callee)] = (callee, callee.__code__, callee.__defaults__)
+        _, rust_name, params, return_type, written = program['index'][key]
         self.guard(name, self.lookup(name))
-        if len(args) != len(params):
-            self.fail(n, f'{name}() needs exactly {len(params)} positional arguments here')
-        values = []
-        for arg, kind in zip(args, params):
-            value, actual = self.expr(arg)
-            if actual != kind:
-                self.fail(arg, f'argument to {name}() must be {kind}, got {actual}')
-            values.append(f'&*{value}' if kind in ARRAY_KINDS else value)
+        rendered = []
+        for (what, value), kind, p in zip(values, params, cparams):
+            if what == 'array':
+                rendered.append(self.amut(value, n) if p in written else self.aref(value))
+            else:
+                rendered.append(value)
         # Each call spends one unit of the iteration budget, so runaway recursion stops too.
-        return f'({{ tick(fuel)?; {rust_name}({", ".join(values + ["fuel", "depth+1"])})? }})', return_type
+        return f'({{ tick(fuel)?; {rust_name}({", ".join(rendered + ["fuel", "depth+1"])})? }})', return_type
 
     # ------------------------------------------------------------- conditions
     def condition(self, n):
@@ -526,19 +1134,17 @@ class Compiler:
             return '(' + op.join(f'({self.condition(v)})' for v in n.values) + ')'
         if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
             return f'!({self.condition(n.operand)})'
-        if isinstance(n, ast.Call) and not n.keywords and len(n.args) == 1:
-            attr = self.math_name(n.func)
-            if attr in ('isnan', 'isinf', 'isfinite'):
-                x = self.as_float(n.args[0])
-                method = {'isnan':'is_nan','isinf':'is_infinite','isfinite':'is_finite'}[attr]
-                return f'(({x}).{method}())'
-        ops = {ast.Lt:'<',ast.LtE:'<=',ast.Gt:'>',ast.GtE:'>=',ast.Eq:'==',ast.NotEq:'!='}
+        ops = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=', ast.Eq: '==', ast.NotEq: '!='}
         if isinstance(n, ast.Compare) and all(type(op) in ops for op in n.ops):
             # Chained comparisons: operands are pure, so evaluating one that Python
             # would have short-circuited can at most cause a guard failure and replay.
             operands = [self.compare_operand(x) for x in [n.left, *n.comparators]]
             parts = []
             for (a, ta, ca), op, (b, tb, cb) in zip(operands, n.ops, operands[1:]):
+                if ta == 'bool':
+                    a, ta = f'({a} as i64)', 'i64'
+                if tb == 'bool':
+                    b, tb = f'({b} as i64)', 'i64'
                 if ta != tb:
                     # int literal vs float: exact when |literal| <= 2**53.
                     if ta == 'i64' and tb == 'f64' and ca is not None:
@@ -546,35 +1152,45 @@ class Compiler:
                     elif tb == 'i64' and ta == 'f64' and cb is not None:
                         b, tb = f'({float(cb)!r}f64)', 'f64'
                 if {ta, tb} == {'i64', 'f64'}:
-                    # Variables of different types: compare exactly, as CPython does.
-                    c = f'cmp_if({a},{b})' if ta == 'i64' else f'cmp_if({b},{a})'
-                    flip = {ast.Lt:ast.Gt,ast.LtE:ast.GtE,ast.Gt:ast.Lt,ast.GtE:ast.LtE}
+                    c = f'cmp_if({a},{b})?' if ta == 'i64' else f'cmp_if({b},{a})?'
+                    flip = {ast.Lt: ast.Gt, ast.LtE: ast.GtE, ast.Gt: ast.Lt, ast.GtE: ast.LtE}
                     kind = type(op) if ta == 'i64' else flip.get(type(op), type(op))
-                    test = {ast.Lt:'c==-1',ast.LtE:'c==-1 || c==0',ast.Gt:'c==1',ast.GtE:'c==1 || c==0',
-                            ast.Eq:'c==0',ast.NotEq:'c!=0'}[kind]
+                    test = {
+                        ast.Lt: 'c==-1',
+                        ast.LtE: 'c==-1 || c==0',
+                        ast.Gt: 'c==1',
+                        ast.GtE: 'c==1 || c==0',
+                        ast.Eq: 'c==0',
+                        ast.NotEq: 'c!=0',
+                    }[kind]
                     parts.append(f'({{ let c={c}; {test} }})')
                     continue
-                if ta != tb or ta in ARRAY_KINDS:
-                    self.fail(n, 'comparison operands must be int or float values')
+                if ta != tb or ta not in ('i64', 'f64'):
+                    self.fail(n, 'comparison operands must be int, float or bool values')
                 parts.append(f'(({a}) {ops[type(op)]} ({b}))')
             return '(' + ' && '.join(parts) + ')'
-        try:
-            value, kind = self.expr(n)
-        except Unsupported:
-            self.fail(n, 'unsupported condition')
+        value, kind = self.expr(n)
+        if kind == 'bool':
+            return f'({value})'
         if kind == 'i64':
             return f'(({value}) != 0i64)'
         if kind == 'f64':
             return f'(({value}) != 0.0f64)'  # NaN is truthy, -0.0 is falsy, as in Python
-        self.fail(n, 'arrays cannot be used as conditions')
+        self.fail(
+            n, 'arrays and tuples cannot be used as conditions', 'Use len(a) > 0 to test whether an array is empty.'
+        )
 
     def compare_operand(self, node):
         """Return (rust, kind, exact_int_literal_or_None)."""
         literal = None
         if isinstance(node, ast.Constant) and type(node.value) is int:
             literal = node.value
-        elif (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
-              and isinstance(node.operand, ast.Constant) and type(node.operand.value) is int):
+        elif (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and type(node.operand.value) is int
+        ):
             literal = -node.operand.value
         if literal is not None and abs(literal) > 2**53:
             literal = None
@@ -582,43 +1198,80 @@ class Compiler:
         return value, kind, literal
 
     # ------------------------------------------------------------- statements
+    def assign(self, node, name, value, kind):
+        if kind in ARRAY_KINDS and not (name not in self.params and value.startswith('Arr::')):
+            self.fail(
+                node,
+                'arrays can only be created with np.zeros/np.empty/np.ones, not copied or aliased',
+                'Write into the original array, or create a new one with np.zeros_like(a).',
+            )
+        if tuple_parts(kind):
+            self.fail(node, 'tuples can only be unpacked, like a, b = divmod(x, y)')
+        if name in self.types and self.types[name] != kind:
+            self.fail(
+                node,
+                f'{name!r} changes type from {self.types[name]} to {kind}',
+                'Start float variables at 0.0, not 0, so the type never changes.',
+            )
+        if self.parallel is not None and kind in ARRAY_KINDS:
+            self.fail(node, 'arrays cannot be created inside prange', 'Create them before the loop.')
+        if self.parallel is not None and name in self.parallel['outer']:
+            self.fail(
+                node,
+                f'prange iterations must not assign {name!r}, which exists outside the loop',
+                'Only out[i] = ... writes and += on int totals are allowed for outer names inside prange.',
+            )
+        self.types[name] = kind
+        self.assigned.add(name)
+        if kind in ARRAY_KINDS:
+            self.local_arrays.add(name)
+        return f'{self.name(name)} = {value};'
+
     def store(self, node, target, value_node, op=None):
-        """array[index] = value (or op=) -> Rust statement."""
-        if not (isinstance(target.value, ast.Name) and target.value.id in self.written):
-            self.fail(node, 'only F64Array / I64Array parameters can be written with a[i] = value')
-        a, kind = self.array(target.value)
+        """a[i] = v, a[i, j] = v, a[i][j] = v, or the op= forms."""
+        name, kind, idx = self.indices(target)
+        if name in self.params and name not in self.written:
+            self.written.add(name)
         element = ELEMENT[kind]
-        i = self.expect(target.slice, 'i64')
-        self.counter += 1
-        j = self.counter
+        j = self.temp('w')
+        names = [f'{j}i{k}' for k in range(len(idx))]
+        index_lets = ' '.join(f'let {nm}: i64 = {ix};' for nm, ix in zip(names, idx))
+        reader = 'at' if len(idx) == 1 else 'at2'
+        writer = 'put' if len(idx) == 1 else 'put2'
+        current_name = f'__element{j}'
         if op is None:
             value, vkind = self.scalar(value_node)
         else:
             if not isinstance(op, (ast.Add, ast.Sub, ast.Mult)) and not (element == 'f64' and isinstance(op, ast.Div)):
-                self.fail(node, 'array elements support +=, -=, *= (and /= for F64Array)')
-            current = ast.Name(id=f'__element{j}', ctx=ast.Load())
-            self.types[current.id] = element
-            self.names[current.id] = f'e{j}'
-            self.assigned.add(current.id)
-            value, vkind = self.binop(node, current, op, value_node)
-            self.assigned.discard(current.id)
-            del self.types[current.id]
+                self.fail(node, 'array elements support +=, -=, *= (and /= for float arrays)')
+            self.types[current_name] = element
+            self.names[current_name] = f'{j}e'
+            self.assigned.add(current_name)
+            value, vkind = self.binop(node, ast.Name(id=current_name, ctx=ast.Load()), op, value_node)
+            self.assigned.discard(current_name)
+            del self.types[current_name]
         if element == 'f64' and vkind == 'i64':
             value, vkind = f'({value} as f64)', 'f64'
         if vkind != element:
-            self.fail(node, 'I64Array elements can only be set to int values')
-        read = f'let e{j}: {element} = at(&*{a},i{j})?; ' if op is not None else ''
-        return f'{{ let i{j}: i64 = {i}; {read}let w{j}: {element} = {value}; put(&mut *{a},i{j},w{j})?; }}'
+            self.fail(node, 'int arrays can only be set to int values', 'Convert with int(x) or round(x) first.')
+        read = f'let {j}e: {element} = {reader}({self.aref(name)},{",".join(names)})?; ' if op is not None else ''
+        destination = (
+            f'{writer}_par({self.aref(name)},' if self.parallel is not None else f'{writer}({self.amut(name, node)},'
+        )
+        return f'{{ {index_lets} {read}let {j}v: {element} = {value}; {destination}{",".join(names)},{j}v)?; }}'
 
-    def assign(self, node, name, value, kind):
-        if kind in ARRAY_KINDS:
-            self.fail(node, 'arrays cannot be assigned to other variables')
-        if name in self.types and self.types[name] != kind:
-            self.fail(node, f'{name!r} changes type from {self.types[name]} to {kind}; '
-                            'start float variables at 0.0, not 0')
-        self.types[name] = kind
-        self.assigned.add(name)
-        return f'{self.name(name)} = {value};'
+    def unpack(self, node, targets, value_node):
+        value, kind = self.expr(value_node)
+        parts = tuple_parts(kind)
+        if not parts or len(parts) != len(targets):
+            self.fail(node, f'cannot unpack {kind} into {len(targets)} names')
+        t = self.temp('u')
+        lines = [f'let {t} = {value};']
+        for k, (target, part) in enumerate(zip(targets, parts)):
+            if not isinstance(target, ast.Name):
+                self.fail(node, 'unpack into plain names, like a, b = ...')
+            lines.append(self.assign(node, target.id, f'{t}.{k}', part))
+        return '{ ' + ' '.join(lines) + ' }'
 
     def block(self, nodes):
         """Compile statements. Sets self.exits to True when control can never fall
@@ -628,30 +1281,30 @@ class Compiler:
         for n in nodes:
             if exits:
                 break  # unreachable in Python too
-            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value,str):
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
                 continue
             if isinstance(n, ast.Pass):
                 continue
-            if isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Subscript):
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Subscript):
                 lines.append(self.store(n, n.targets[0], n.value))
-            elif isinstance(n, ast.AugAssign) and isinstance(n.target,ast.Subscript):
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Subscript):
                 lines.append(self.store(n, n.target, n.value, n.op))
-            elif isinstance(n, ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name):
+            elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Tuple):
+                lines.append(self.unpack(n, n.targets[0].elts, n.value))
+            elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
                 value, kind = self.expr(n.value)
                 lines.append(self.assign(n, n.targets[0].id, value, kind))
-            elif isinstance(n, ast.AnnAssign) and isinstance(n.target,ast.Name) and n.value is not None:
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
                 value, kind = self.expr(n.value)
                 lines.append(self.assign(n, n.target.id, value, kind))
-            elif isinstance(n, ast.AugAssign) and isinstance(n.target,ast.Name):
-                value, kind = self.binop(n, ast.Name(id=n.target.id, ctx=ast.Load()), n.op, n.value)
-                lines.append(self.assign(n, n.target.id, value, kind))
-            elif isinstance(n, ast.Return) and n.value is not None and not (
-                    isinstance(n.value, ast.Constant) and n.value.value is None):
-                value, kind = self.expr(n.value)
-                if kind in ARRAY_KINDS or (self.return_type and kind != self.return_type):
-                    self.fail(n, 'every return must have the same scalar type (int or float)')
-                self.return_type = kind
-                lines.append(f'return Ok({value});')
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+                lines.append(self.augassign(n))
+            elif (
+                isinstance(n, ast.Return)
+                and n.value is not None
+                and not (isinstance(n.value, ast.Constant) and n.value.value is None)
+            ):
+                lines.append(self.return_value(n))
                 exits = True
             elif isinstance(n, ast.Return):
                 if self.return_type not in (None, 'none'):
@@ -679,117 +1332,381 @@ class Compiler:
                     self.assigned = yes_assigned & no_assigned
                 exits = yes_exits and no_exits
                 lines.append(f'if {cond} {{\n{yes}\n}} else {{\n{no}\n}}')
-            elif isinstance(n, (ast.For,ast.While)) and not n.orelse:
+            elif isinstance(n, ast.For) and not n.orelse:
+                lines.append(self.for_loop(n))
+            elif isinstance(n, ast.While) and not n.orelse:
+                if self.parallel is not None:
+                    self.fail(n, 'loops inside prange are not compiled')
                 before = self.assigned.copy()
-                self.counter += 1
-                j = self.counter
-                if isinstance(n,ast.For):
-                    call = n.iter
-                    if not (isinstance(n.target,ast.Name) and isinstance(call,ast.Call)
-                            and isinstance(call.func,ast.Name) and call.func.id=='range'
-                            and 1 <= len(call.args) <= 3 and not call.keywords):
-                        self.fail(n.iter, 'for loops must use range(...)')
-                    self.builtin('range')
-                    args = [self.expect(a,'i64') for a in call.args]
-                    start, stop, step = ('0i64',args[0],'1i64') if len(args)==1 else (args[0],args[1],args[2] if len(args)==3 else '1i64')
-                    target = self.assign(n, n.target.id, f'current{j} as i64','i64')
-                    header = f'''{{ let mut cursor{j} = ({start}) as i128;
-let stop{j} = ({stop}) as i128; let step{j} = ({step}) as i128;
-if step{j}==0 {{return Err(2)}}
-while if step{j}>0 {{cursor{j}<stop{j}}} else {{cursor{j}>stop{j}}} {{
-tick(fuel)?;
-let current{j}=cursor{j}; cursor{j}+=step{j};
-{target}'''
-                    tail = '}}'
-                else:
-                    header = f'while {self.condition(n.test)} {{\ntick(fuel)?;'
-                    tail = '}'
+                header = f'while {self.condition(n.test)} {{\ntick(fuel)?;'
                 self.loop_depth += 1
                 body = self.block(n.body)
                 self.loop_depth -= 1
                 self.assigned = before
-                lines.append(f'{header}\n{body}\n{tail}')
-            elif isinstance(n,(ast.Break,ast.Continue)) and self.loop_depth:
-                lines.append('break;' if isinstance(n,ast.Break) else 'continue;')
+                lines.append(f'{header}\n{body}\n}}')
+            elif isinstance(n, (ast.Break, ast.Continue)) and self.loop_depth:
+                if self.parallel is not None and self.loop_depth == self.parallel['depth']:
+                    if isinstance(n, ast.Break):
+                        self.fail(n, 'break is not allowed directly inside prange')
+                    lines.append('return Ok(());')  # continue = end this iteration
+                else:
+                    lines.append('break;' if isinstance(n, ast.Break) else 'continue;')
                 exits = True
+            elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call):
+                self.fail(
+                    n,
+                    'calls whose result is thrown away are not compiled (they can only have side effects)',
+                    'Remove print()/logging from the hot function, or use the returned value.',
+                )
             else:
                 self.fail(n, f'unsupported statement ({type(n).__name__})')
         self.exits = exits
         return '\n'.join(lines)
 
+    def augassign(self, n):
+        name = n.target.id
+        if self.parallel is not None and name in self.parallel['outer']:
+            # Integer += reductions are exact in any order; floats are not.
+            if not isinstance(n.op, ast.Add) or self.types.get(name) != 'i64':
+                self.fail(
+                    n,
+                    'inside prange, only += on an int total defined outside the loop is allowed',
+                    'Float sums depend on the order of additions, so they would not match Python. '
+                    'Write each result to out[i] and sum afterwards.',
+                )
+            self.parallel['reductions'].discard(name)  # the right-hand side may not read it, the total may
+            value = self.expect(n.value, 'i64')
+            self.parallel['reductions'].add(name)
+            return f'{self.name(name)}_part = ({self.name(name)}_part).checked_add({value}).ok_or(1)?;'
+        value, kind = self.binop(n, ast.Name(id=name, ctx=ast.Load()), n.op, n.value)
+        return self.assign(n, name, value, kind)
+
+    def return_value(self, n):
+        if self.parallel is not None:
+            self.fail(n, 'return is not allowed inside prange')
+        if isinstance(n.value, ast.Name) and self.types.get(n.value.id) in ARRAY_KINDS:
+            name = n.value.id
+            if name in self.params:
+                self.fail(
+                    n,
+                    'returning an array argument is not compiled (Python returns the same object)',
+                    'Return a new array made with np.zeros(...), or just write into the argument.',
+                )
+            kind = self.types[name]
+            value = f'std::mem::replace(&mut {self.name(name)}, Arr::empty())'
+        else:
+            value, kind = self.expr(n.value)
+        if self.return_type and kind != self.return_type:
+            self.fail(
+                n,
+                'every return must have the same type',
+                'Return 0.0 instead of 0 (or the other way round) on every path.',
+            )
+        self.return_type = kind
+        return f'return Ok({value});'
+
+    def for_loop(self, n):
+        call = n.iter
+        before = self.assigned.copy()
+        j = self.temp('L')
+        if self.parallel is not None:
+            self.fail(n, 'loops inside prange are not compiled', 'Move the inner loop into a helper function.')
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id in ('range', 'enumerate')
+            and call.func.id in self.local_names
+        ):
+            self.fail(n.iter, f'local {call.func.id} shadowing is unsupported')
+        if (
+            isinstance(call, ast.Call)
+            and not call.keywords
+            and (
+                (isinstance(call.func, ast.Name) and call.func.id == 'range' and self.is_builtin('range'))
+                or self.is_prange(call.func)
+            )
+            and 1 <= len(call.args) <= 3
+        ):
+            if not isinstance(n.target, ast.Name):
+                self.fail(n.target, 'range loops need one loop variable')
+            parallel = self.is_prange(call.func)
+            if not parallel:
+                self.builtin('range')
+            args = [self.expect(a, 'i64') for a in call.args]
+            start, stop, step = (
+                ('0i64', args[0], '1i64')
+                if len(args) == 1
+                else (args[0], args[1], args[2] if len(args) == 3 else '1i64')
+            )
+            if parallel:
+                if len(args) == 3:
+                    self.fail(n, 'prange supports prange(stop) and prange(start, stop)')
+                return self.parallel_loop(n, start, stop, before)
+            target = self.assign(n, n.target.id, f'current{j} as i64', 'i64')
+            header = f"""{{ let mut cursor{j} = ({start}) as i128;
+let stop{j} = ({stop}) as i128; let step{j} = ({step}) as i128;
+if step{j}==0 {{return Err(2)}}
+while if step{j}>0 {{cursor{j}<stop{j}}} else {{cursor{j}>stop{j}}} {{
+tick(fuel)?;
+let current{j}=cursor{j}; cursor{j}+=step{j};
+{target}"""
+        elif (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == 'enumerate'
+            and self.is_builtin('enumerate')
+            and not call.keywords
+            and 1 <= len(call.args) <= 2
+        ):
+            self.builtin('enumerate')
+            if not (
+                isinstance(n.target, ast.Tuple)
+                and len(n.target.elts) == 2
+                and all(isinstance(e, ast.Name) for e in n.target.elts)
+            ):
+                self.fail(n.target, 'use for i, x in enumerate(a)')
+            arr, kind = self.array(call.args[0])
+            if ARRAY_INFO[kind][1] != 1:
+                self.fail(call, 'enumerate() over a 2-D array yields rows; it is not compiled')
+            start = self.expect(call.args[1], 'i64') if len(call.args) == 2 else '0i64'
+            index_target = self.assign(
+                n, n.target.elts[0].id, f'(start{j}).checked_add(idx{j} as i64).ok_or(1)?', 'i64'
+            )
+            item_target = self.assign(n, n.target.elts[1].id, f'at({self.aref(arr)},idx{j} as i64)?', ELEMENT[kind])
+            header = f"""{{ let start{j}: i64 = {start}; let n{j} = ({self.aref(arr)}).len; let mut k{j}: usize = 0;
+while k{j} < n{j} {{
+tick(fuel)?;
+let idx{j}=k{j}; k{j}+=1;
+{index_target}
+{item_target}"""
+        elif isinstance(call, ast.Name) and call.id in self.assigned and self.types.get(call.id) in ARRAY_KINDS:
+            arr, kind = call.id, self.types[call.id]
+            if ARRAY_INFO[kind][1] != 1:
+                self.fail(call, 'looping over a 2-D array yields rows; loop over range(a.shape[0]) instead')
+            if not isinstance(n.target, ast.Name):
+                self.fail(n.target, 'use one loop variable: for x in a')
+            item_target = self.assign(n, n.target.id, f'at({self.aref(arr)},idx{j} as i64)?', ELEMENT[kind])
+            header = f"""{{ let n{j} = ({self.aref(arr)}).len; let mut k{j}: usize = 0;
+while k{j} < n{j} {{
+tick(fuel)?;
+let idx{j}=k{j}; k{j}+=1;
+{item_target}"""
+        else:
+            self.fail(
+                n.iter,
+                'for loops must use range(...), a NumPy array, enumerate(array) or prange(...)',
+                'To loop over a list, pass it as a NumPy array: np.asarray(values, dtype=np.float64).',
+            )
+        self.loop_depth += 1
+        body = self.block(n.body)
+        self.loop_depth -= 1
+        self.assigned = before
+        return f'{header}\n{body}\n}}}}'
+
+    def parallel_loop(self, n, start, stop, before):
+        """prange: iterations split across threads. Only independent writes (out[i]) and
+        int += totals are allowed, so the result is exactly the sequential one."""
+        if self.loop_depth:
+            self.fail(n, 'prange must be the outermost loop', 'Put the prange loop at the top level of the function.')
+        var = n.target.id
+        writes, augmented = set(), set()
+        for node in (x for stmt in n.body for x in ast.walk(stmt)):
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else ([node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else [])
+            )
+            for t in targets:
+                base = t.value if isinstance(t, ast.Subscript) else None
+                if isinstance(base, ast.Subscript):
+                    base = base.value
+                if isinstance(base, ast.Name):
+                    writes.add(base.id)
+            if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                augmented.add(node.target.id)
+        outer = {v for v in self.assigned if v != var and self.types.get(v) in SCALARS}
+        arrays = {v for v in self.assigned if self.types.get(v) in ARRAY_KINDS}
+        reductions = augmented & outer
+        self.parallel = {
+            'var': var,
+            'outer': outer,
+            'arrays': arrays,
+            'writes': writes & arrays,
+            'reductions': set(reductions),
+            'depth': 1,
+        }
+        saved_types = dict(self.types)
+        self.program['parallel'] = True
+        try:
+            self.types[var] = 'i64'
+            self.assigned.add(var)
+            loop_var = self.name(var)
+            self.loop_depth += 1
+            body = self.block(n.body)
+            self.loop_depth -= 1
+        finally:
+            self.parallel = None
+        self.assigned = before
+        inner = [k for k in self.types if k not in saved_types and k != var and self.types[k] in SCALARS]
+        decls = ' '.join(
+            f'let mut {self.name(k)}: {RUST_TYPE[self.types[k]]} = '
+            f'{ {"f64": "0.0", "bool": "false"}.get(self.types[k], "0") };'
+            for k in inner
+        )
+        reds = sorted(reductions)
+        j = self.temp('P')
+        part_type = '(' + ','.join('i64' for _ in reds) + (',' if len(reds) == 1 else '') + ')'
+        part_value = '(' + ','.join(f'{self.name(r)}_part' for r in reds) + (',' if len(reds) == 1 else '') + ')'
+        part_init = ' '.join(f'let mut {self.name(r)}_part: i64 = 0;' for r in reds)
+        merge = ' '.join(
+            f'{self.name(r)} = ({self.name(r)}).checked_add(p{j}.{k}).ok_or(1)?;' for k, r in enumerate(reds)
+        )
+        snapshots = ' '.join(
+            f'(*{self.name(a)}).snapshot();' if a in self.params else f'{self.name(a)}.snapshot();'
+            for a in sorted(writes & arrays)
+            if a in self.params or a in self.local_arrays
+        )
+        views = ' '.join(
+            f'let {self.name(a)}_r: &Arr<{ELEMENT[self.types[a]]}> = {"&*" if a in self.params else "&"}{self.name(a)};'
+            for a in sorted(arrays)
+        )
+        return f"""{{ let start{j}: i64 = {start}; let stop{j}: i64 = {stop};
+{snapshots}
+let total{j}: i64 = if stop{j} > start{j} {{ stop{j} - start{j} }} else {{ 0 }};
+if (fuel.fuel as u128) < (total{j} as u128) {{ return Err(4) }}
+fuel.fuel -= total{j} as u64;
+let threads{j}: i64 = if total{j} < {PARALLEL_MIN} {{ 1 }} else {{
+    std::thread::available_parallelism().map(|c| c.get() as i64).unwrap_or(1).min(64) }};
+let chunk{j}: i64 = if total{j} == 0 {{ 1 }} else {{ (total{j} + threads{j} - 1) / threads{j} }};
+let cancel{j} = SendPtr(fuel.cancel as *mut AtomicU8);
+{views}
+let results{j}: Vec<Result<{part_type},i32>> = std::thread::scope(|scope| {{
+    let mut handles = Vec::new();
+    let mut lo = start{j};
+    while lo < stop{j} {{
+        let hi = if stop{j} - lo > chunk{j} {{ lo + chunk{j} }} else {{ stop{j} }};
+        handles.push(scope.spawn(move || -> Result<{part_type},i32> {{
+            let mut ctx = Ctx{{fuel: u64::MAX, cancel: cancel{j}.0 as *const AtomicU8, ticks: 0}};
+            let fuel = &mut ctx;
+            {part_init}
+            let mut i = lo;
+            while i < hi {{
+                tick(fuel)?;
+                let step: Result<(),i32> = (|| -> Result<(),i32> {{
+                    {decls}
+                    let mut {loop_var}: i64 = i;
+                    {body}
+                    Ok(())
+                }})();
+                step?;
+                i += 1;
+            }}
+            Ok({part_value})
+        }}));
+        lo = hi;
+    }}
+    handles.into_iter().map(|h| h.join().unwrap_or(Err(8))).collect()
+}});
+for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
+}}"""
+
     # ------------------------------------------------------------- generation
-    def function_text(self, rust_name):
-        params = list(self.signature.parameters)
+    def function_text(self, rust_name, key=None):
         body = self.block(self.node.body)
         if self.return_type is None:
             self.return_type = 'none'  # no return statement: Python returns None
-        recursive = self.program['recursive'].get(id(self.function))
+        recursive = self.program['recursive'].get(key) if key is not None else None
         if recursive is not None and recursive != self.return_type:
-            raise Unsupported(f'{self.function.__name__}: recursive function returns {self.return_type} '
-                              f'but is annotated {recursive}')
-        rust_type = '()' if self.return_type == 'none' else self.return_type
+            raise Unsupported(
+                f'{self.function.__name__}: recursive function returns {self.return_type} but is annotated {recursive}'
+            )
         # A value-returning path that falls off the end returns Err(5): the call is
         # replayed in Python, which returns None exactly as the original function does.
         end = 'Ok(())' if self.return_type == 'none' else 'Err(5)'
-        declarations = '\n'.join(f'let mut {self.name(k)}: {t} = {"0.0" if t=="f64" else "0"};'
-                                 for k,t in self.types.items() if k not in params and t in ('i64','f64'))
+        declarations = []
+        for k, t in self.types.items():
+            if k in self.params:
+                continue
+            if t in ARRAY_KINDS:
+                declarations.append(f'let mut {self.name(k)}: {rust_type(t)} = Arr::empty();')
+            elif t in SCALARS:
+                init = {'f64': '0.0', 'bool': 'false'}.get(t, '0')
+                declarations.append(f'let mut {self.name(k)}: {RUST_TYPE[t]} = {init};')
         arguments = []
-        for p in params:
+        for p in self.params:
             kind = self.types[p]
             if kind in ARRAY_KINDS:
                 ref = '&mut ' if p in self.written else '&'
-                arguments.append(f'{self.name(p)}: {ref}[{ELEMENT[kind]}]')
+                arguments.append(f'{self.name(p)}: {ref}{rust_type(kind)}')
             else:
-                arguments.append(f'mut {self.name(p)}: {kind}')
-        arguments += ['fuel: &mut u64', 'depth: u32']
-        return (f'fn {rust_name}({", ".join(arguments)})->Result<{rust_type},i32>{{\n'
-                f'if depth>{MAX_DEPTH} {{return Err(6)}}\n'
-                f'{declarations}\n{body}\n{end}\n}}')
+                arguments.append(f'mut {self.name(p)}: {RUST_TYPE[kind]}')
+        arguments += ['fuel: &mut Ctx', 'depth: u32']
+        return (
+            f'fn {rust_name}({", ".join(arguments)})->Result<{rust_type(self.return_type)},i32>{{\n'
+            f'if depth>{MAX_DEPTH} {{return Err(6)}}\n' + '\n'.join(declarations) + f'\n{body}\n{end}\n}}'
+        )
 
     def generate(self):
-        params = list(self.signature.parameters)
+        key = (id(self.function), tuple(self.types[p] for p in self.params))
         self.program['stack'].append(self.function)
-        self.register('compute')
+        self.register('compute', key)
         try:
-            main = self.function_text('compute')
+            main = self.function_text('compute', key)
         finally:
             self.program['stack'].pop()
-        ffi=[]; calls=[]; setup=[]; publish=[]
-        for p in params:
-            name=self.name(p); kind=self.types[p]
+        ffi, setup, calls, rollback = [], [], [], []
+        for p in self.params:
+            name, kind = self.name(p), self.types[p]
             if kind in ARRAY_KINDS:
-                t = ELEMENT[kind]
+                element = ELEMENT[kind]
+                track = 'true' if p in self.written else 'false'
+                ffi += [f'{name}: *mut {element}', f'{name}_rows: usize', f'{name}_cols: usize']
+                setup.append(f'let mut a_{name} = Arr::<{element}>::view({name},{name}_rows,{name}_cols,{track});')
+                calls.append(f'&mut a_{name}' if p in self.written else f'&a_{name}')
                 if p in self.written:
-                    # Copy-on-write: the caller's array changes only if the call succeeds.
-                    ffi.extend([f'{name}: *mut {t}', f'{name}_len: usize'])
-                    setup.append(f'let mut copy_{name}: Vec<{t}> = if {name}_len==0 {{ Vec::new() }} '
-                                 f'else {{ std::slice::from_raw_parts({name},{name}_len).to_vec() }};')
-                    calls.append(f'&mut copy_{name}[..]')
-                    publish.append(f'if {name}_len>0 {{ std::slice::from_raw_parts_mut({name},{name}_len)'
-                                   f'.copy_from_slice(&copy_{name}); }}')
-                else:
-                    ffi.extend([f'{name}: *const {t}', f'{name}_len: usize'])
-                    calls.append(f'if {name}_len==0 {{ &[] }} else {{ std::slice::from_raw_parts({name},{name}_len) }}')
+                    rollback.append(f'a_{name}.rollback();')
             else:
-                ffi.append(f'{name}: {kind}')
+                ffi.append(f'{name}: {RUST_TYPE[kind]}')
                 calls.append(name)
-        out_type = 'i64' if self.return_type == 'none' else self.return_type
-        store = '' if self.return_type == 'none' else '*out=v;'
-        ffi.append(f'out: *mut {out_type}')
-        calls += ['&mut fuel', '0']
+        rt = self.return_type
+        if rt in ARRAY_KINDS:
+            element = ELEMENT[rt]
+            ffi += [
+                f'out_ptr: *mut *mut {element}',
+                'out_len: *mut usize',
+                'out_rows: *mut usize',
+                'out_cols: *mut usize',
+            ]
+            store = '*out_rows=v.rows; *out_cols=v.cols; let (p,n)=into_raw(v); *out_ptr=p; *out_len=n;'
+        elif tuple_parts(rt):
+            parts = tuple_parts(rt)
+            ffi += [f'out{k}: *mut {RUST_TYPE[t]}' for k, t in enumerate(parts)]
+            store = ' '.join(f'*out{k}=v.{k};' for k in range(len(parts)))
+        elif rt == 'none':
+            store = ''
+        else:
+            ffi.append(f'out0: *mut {RUST_TYPE[rt]}')
+            store = '*out0=v;'
+        ffi += ['fuel: u64', 'cancel: *const AtomicU8']
+        calls += ['&mut ctx', '0']
         callees = '\n'.join(self.program['functions'])
-        return f'''// Generated by PyRust Engine 0.6.
-#![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true)]
+        return f"""// Generated by PyRust Engine 0.7.
+#![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true,unused_braces,unused_unsafe,non_snake_case,unused_imports)]
 {HELPERS}
 {callees}
 {main}
+static QUIET: std::sync::Once = std::sync::Once::new();
 #[no_mangle]
-pub unsafe extern "C" fn pyrust_run({','.join(ffi)})->i32{{
-let mut fuel:u64={self.max_iterations};
+pub unsafe extern "C" fn pyrust_run({', '.join(ffi)})->i32{{
+QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {{}})));
+let mut ctx = Ctx{{fuel, cancel, ticks: 0}};
 {chr(10).join(setup)}
-match compute({','.join(calls)}) {{Ok(v)=>{{{' '.join(publish)} {store} 0}},Err(code)=>code}}
+let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute({', '.join(calls)})));
+let status = match result {{ Ok(Ok(v)) => {{ {store} 0 }}, Ok(Err(code)) => code, Err(_) => 8 }};
+if status != 0 {{ {' '.join(rollback)} }}
+status
 }}
-'''
+"""
 
     # ---------------------------------------------------------- introspection
     @property
@@ -808,5 +1725,6 @@ match compute({','.join(calls)}) {{Ok(v)=>{{{' '.join(publish)} {store} 0}},Err(
 class _Missing:
     def __repr__(self):
         return '<missing>'
+
 
 _MISSING = _Missing()

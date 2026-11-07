@@ -8,26 +8,70 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.10', '3.12', '3.13']
+        python: ['3.10', '3.12', '3.13', '3.14', '3.15']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          allow-prereleases: true
       - uses: dtolnay/rust-toolchain@stable
       - run: rustc --version
-      - run: python -m pip install ".[arrays]"
-      - run: python -m unittest discover -s tests -v
+      - run: python -m pip install ".[arrays]" coverage
+      - name: Tests (with coverage)
+        run: python -m coverage run -m unittest discover -s tests -v
+      - name: Coverage summary
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        shell: bash
+        run: |
+          python -m coverage report -m > coverage.txt
+          tail -n 1 coverage.txt
+          {
+            echo "### Test coverage (Linux, Python 3.13)"
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Larger generated-program fuzz run
         env:
           PYRUST_FUZZ_PROGRAMS: '150'
         run: python -m unittest tests.test_fuzz -v
       - run: python -m examples.benchmark_suite --output benchmarks/ci-results.json
+      - name: Compare with the last release
+        shell: bash
+        run: python benchmarks/compare.py benchmarks/ci-results.json >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: results-${{ matrix.os }}-${{ matrix.python }}
           path: benchmarks/ci-results.json
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install ruff mypy
+      - run: ruff check pyrust_engine
+      - run: ruff format --check pyrust_engine
+      - run: mypy
+
+  numba-comparison:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python -m pip install ".[benchmark]"
+      - run: python -m examples.benchmark_suite --output benchmarks/numba-comparison.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: numba-comparison
+          path: benchmarks/numba-comparison.json
 
   package:
     runs-on: ubuntu-latest
