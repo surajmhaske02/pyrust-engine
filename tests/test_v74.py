@@ -248,7 +248,9 @@ class TextColumns(unittest.TestCase):
         result = vectorized(*columns)
         values = result.tolist()
         self.assertEqual(values, expected)
-        if RUST and all(ord(ch) < 128 for c in columns if isinstance(c, list) for s in c for ch in s):
+        text_lists = [c for c in columns if isinstance(c, list)]
+        native = all(c and all(s.isascii() for s in c) for c in text_lists)  # an empty list has no type: Python loop
+        if RUST and native:
             self.assertEqual(vectorized.report()['backend'], 'rust')
 
     def test_lists(self):
