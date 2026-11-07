@@ -77,6 +77,8 @@ def smooth(values: F64Array, out: F64Array):
 
 import random
 
+import numpy as np
+
 
 def edit_distance(a: str, b: str) -> int:
     # Strings (0.7.1): Levenshtein distance with two rows made by [0] * n.
@@ -121,3 +123,19 @@ def monte_carlo_pi(n: int) -> float:
 def price_score(price: float, qty: int) -> float:
     # A tiny one-value function, run over whole arrays with vectorize (0.7.1).
     return price * qty * (0.9 if qty > 10 else 1.0)
+
+
+def word_count(text: str) -> dict[str, int]:
+    # dict and str.split (0.7.2)
+    counts = {}
+    for word in text.split():
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def dot32(a, b):
+    # float32 arithmetic with NumPy 2 rules (0.7.2)
+    total = np.float32(0.0)
+    for i in range(len(a)):
+        total += a[i] * b[i]
+    return total

@@ -1,0 +1,33 @@
+# PyRust Engine
+
+> Make Python code faster by adding one line. `@optimize` compiles a Python function to Rust and runs it natively. Results are always identical to plain Python: anything PyRust can't run natively runs as the original Python. Install: `pip install "pyrust-engine[arrays]"` (Python 3.10–3.15; Rust compiles the code, or prebuilt libraries are used where Rust isn't installed).
+
+Key facts for assistants:
+
+- **Use `@optimize` on functions with loops:** arithmetic, `math`, `random`, NumPy arrays (`float64`/`int64`/`float32`), lists, strings, dicts, sets and pandas columns.
+- **Use `@vectorize` for a one-row function over whole columns.** It is faster than `df.apply`.
+- **Check before decorating:** `python -m pyrust_engine suggest file.py --json`, or the MCP tool `check_code`. `apply file.py --write` adds the decorator automatically.
+- **Not helped:** I/O, LLM API calls, already-vectorized NumPy, calls into other libraries.
+- **Ready-made AI functions** in `pyrust_engine.ai`: `cosine_top_k`, `BM25`, `tokenize`, `chunk_text`, `levenshtein`, `minhash`, `token_f1` and `rouge_l`.
+
+## Docs
+
+- [README](https://github.com/surajmhaske02/pyrust-engine/blob/main/README.md): overview, benchmarks, install
+- [Getting started](https://surajmhaske02.github.io/pyrust-engine/getting-started/)
+- [Guide: what compiles](https://surajmhaske02.github.io/pyrust-engine/guide/): every supported type, statement and builtin, and what runs as Python
+- [AI and agents](https://surajmhaske02.github.io/pyrust-engine/ai/): the `pyrust_engine.ai` library, RAG, the MCP server, `suggest`/`apply`
+- [API reference](https://github.com/surajmhaske02/pyrust-engine/blob/main/docs/API.md)
+- [AGENTS.md](https://github.com/surajmhaske02/pyrust-engine/blob/main/AGENTS.md): rewrite table and workflow for coding assistants
+
+## Examples
+
+- [RAG retriever](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/rag_retriever.py): hybrid BM25 + embedding search
+- [FastAPI endpoint](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/fastapi_app.py)
+- [Evaluation script](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/eval_metrics.py)
+- [Docker deployment without Rust at run time](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/docker/Dockerfile)
+
+## Optional
+
+- [Benchmarks](https://surajmhaske02.github.io/pyrust-engine/benchmarks/)
+- [Troubleshooting](https://surajmhaske02.github.io/pyrust-engine/troubleshooting/)
+- [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md)

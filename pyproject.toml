@@ -11,6 +11,16 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
+keywords = ["performance", "rust", "compiler", "jit", "numpy", "pandas", "rag", "llm", "mcp", "speed"]
+
+[project.scripts]
+pyrust-engine = "pyrust_engine.__main__:main"
+pyrust-mcp = "pyrust_engine.mcp:main"
+
+[project.urls]
+Homepage = "https://github.com/surajmhaske02/pyrust-engine"
+Documentation = "https://surajmhaske02.github.io/pyrust-engine/"
+Changelog = "https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["pyrust_engine*"]

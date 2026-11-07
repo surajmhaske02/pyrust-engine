@@ -48,6 +48,14 @@ def main():
     p = commands.add_parser('check', help='Explain which functions in a trusted file compile to Rust, and why not')
     p.add_argument('script')
     p.add_argument('--json', action='store_true')
+    p = commands.add_parser('suggest', help='Which functions in a trusted file to decorate, and how to fix the rest')
+    p.add_argument('script')
+    p.add_argument('--json', action='store_true')
+    p = commands.add_parser('apply', help='Add @optimize to functions that compile (shows a diff; --write edits)')
+    p.add_argument('script')
+    p.add_argument('--write', action='store_true', help='edit the file instead of only printing the diff')
+    p.add_argument('--json', action='store_true')
+    commands.add_parser('mcp', help='Run the MCP server for coding agents (JSON-RPC over stdin/stdout)')
     p = commands.add_parser('profile', help='Execute a trusted script once; rank native candidates')
     p.add_argument('script')
     p.add_argument('arguments', nargs=argparse.REMAINDER)
@@ -56,6 +64,28 @@ def main():
     p.add_argument('--days', type=float, default=30)
     p.add_argument('--delete', action='store_true')
     args = parser.parse_args()
+    if args.command == 'mcp':
+        from .mcp import main as serve
+
+        serve()
+        return
+    if args.command in ('suggest', 'apply'):
+        from .advisor import apply, format_suggest, suggest
+
+        if args.command == 'suggest':
+            report = suggest(args.script)
+            print(json.dumps(report, indent=2) if args.json else format_suggest(report))
+        else:
+            report = apply(args.script, write=args.write)
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                print(report['diff'] or 'Nothing to change.')
+                if report['decorated']:
+                    print(('Wrote ' if report['written'] else 'Would decorate ') + ', '.join(report['decorated']))
+                    if not report['written']:
+                        print('Run again with --write to edit the file.')
+        return
     if args.command == 'build':
         from .prebuilt import build
 

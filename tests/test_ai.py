@@ -111,5 +111,20 @@ class Library(unittest.TestCase):
             self.assertEqual(fn.report()['backend'], 'rust', fn.report()['reason'])
 
 
+@unittest.skipUnless(NUMPY, 'NumPy required')
+class Examples(unittest.TestCase):
+    def test_rag_retriever(self):
+        from examples import rag_retriever
+
+        top = rag_retriever.HybridRetriever(rag_retriever.DOCUMENTS).search('how does BM25 rank documents', k=1)
+        self.assertTrue(top[0][0].startswith('BM25 ranks documents'))
+
+    def test_eval_metrics(self):
+        from examples import eval_metrics
+
+        scores = eval_metrics.evaluate(eval_metrics.make_dataset(50))
+        self.assertTrue(0 < scores['token_f1'] <= 1 and 0 < scores['rouge_l'] <= 1)
+
+
 if __name__ == '__main__':
     unittest.main()
