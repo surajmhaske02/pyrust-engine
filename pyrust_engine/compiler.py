@@ -103,7 +103,9 @@ fn tick(c:&mut Ctx)->Result<(),i32>{
     if c.ticks & 0xFFFF==0 && !c.cancel.is_null() && unsafe{(*c.cancel).load(Ordering::Relaxed)}!=0 {return Err(7)}
     Ok(())
 }
-#[derive(Clone,Copy)] struct SendPtr<T>(*mut T);
+struct SendPtr<T>(*mut T);
+impl<T> Clone for SendPtr<T> { fn clone(&self) -> Self { *self } }
+impl<T> Copy for SendPtr<T> {}
 unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
 impl<T> SendPtr<T> { fn get(self) -> *mut T { self.0 } }

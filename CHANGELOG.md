@@ -1,3 +1,47 @@
+# 0.7.0
+
+Everything on the improvement list: much more Python compiles, no budget trap, safer
+array writes, parallel loops, deployment without Rust, and better tooling.
+
+**Language**
+- `bool` values and parameters, `and`/`or`/`not` as values, bools in arithmetic.
+- `for x in array`, `for i, x in enumerate(array, start)`, bare `a[i]` reads.
+- `sum(array)`, `round(x)`, `divmod(a, b)`, `bool(x)`, `math.atan2`, `math.copysign`,
+  `math.fmod` (CPython's exact special cases). `math.hypot` is explained instead of
+  compiled, because CPython uses its own algorithm.
+- Tuples: `a, b = b, a + b`, `q, r = divmod(...)`, `rows, cols = m.shape`, and
+  functions that return several values.
+- Keyword and default arguments in calls to your own functions; helpers may write
+  arrays they receive.
+- 2-D arrays (`F64Array2` / `I64Array2`): `a[i, j]`, `a[i][j]`, `.shape`, `.size`.
+- New arrays from `np.zeros` / `np.empty` / `np.ones` (and `_like`, `dtype=`) can be
+  filled and returned.
+- `prange()` parallel loops on all CPU cores, limited to patterns whose result is
+  exactly the sequential one (each iteration writes its own element; int `+=` totals).
+- Error messages end with a `hint:` line that says how to rewrite the code.
+
+**Runtime**
+- One native specialization per combination of argument types, so unannotated
+  functions and floats passed to int-annotated parameters run natively.
+- No budget trap: calls longer than 50M steps re-run in a background thread with no
+  limit, and Ctrl-C stops them. `max_iterations=N` still sets a hard limit.
+- Array writes use an undo log instead of copying the whole array on every call.
+- Rust panics are caught and replayed in Python instead of aborting the process.
+- Comparisons between ints above 2**53 and floats replay in Python (exact for both
+  Python floats and NumPy scalars).
+
+**Deployment and tools**
+- `python -m pyrust_engine build file.py` compiles functions ahead of time into
+  `__pyrust__/`; machines without Rust load them (verified by SHA-256 and platform).
+- Jupyter: `%load_ext pyrust_engine`, `%pyrust_check`, `%pyrust_benchmark`.
+- Automatic cache cleanup (entries unused for 30 days, `PYRUST_CACHE_MAX_AGE_DAYS`).
+- Code formatted with ruff; ruff and mypy run in CI.
+- CI: Python 3.10 to 3.15 on Linux, macOS and Windows (15 jobs), coverage summary,
+  benchmark comparison with the last release in every job summary, and a Numba
+  comparison job.
+- Documentation website (MkDocs Material on GitHub Pages) with a guide, examples
+  gallery, benchmarks, deployment and troubleshooting.
+
 # 0.6.1
 
 Clear, actionable handling of missing or broken Rust installs.
