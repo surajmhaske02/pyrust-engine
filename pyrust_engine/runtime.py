@@ -6,8 +6,6 @@ import functools
 import hashlib
 import inspect
 import platform
-import shutil
-import subprocess
 import textwrap
 import threading
 import time
@@ -16,6 +14,8 @@ from typing import Any, Callable, Optional, ParamSpec, Protocol, TypeVar, overlo
 import warnings
 from .compiler import Compiler, Unsupported, KNOWN_BUILTINS
 from .cache import cache_root, process_lock, cached_path, compile_library
+from . import toolchain
+from .toolchain import ToolchainError
 
 _STATUS = {1:'integer overflow',2:'zero divisor or zero range step',3:'array index out of bounds',
            4:'native iteration budget exceeded',5:'no scalar return',
@@ -28,6 +28,12 @@ class OptimizationError(RuntimeError):
 
 class PyRustFallbackWarning(RuntimeWarning):
     """A decorated function ran as plain Python instead of native code."""
+
+class RustToolchainWarning(PyRustFallbackWarning):
+    """Rust is missing or broken on this machine, so every decorated function runs as plain Python."""
+
+# Toolchain problems affect every function, so they are reported once per process.
+_TOOLCHAIN_WARNED = set()
 
 LOOP_FREE_REASON=('loop-free function: a native call costs more than the work it saves, '
                   'so it runs as plain Python (pass native_loop_free=True to force Rust)')
@@ -84,12 +90,14 @@ def _explain_text(fn,max_iterations,*,loop_free=False,backend=None,reasons=None)
         lines.append(f'  returns: {info["returns"]}')
         if info['calls']:
             lines.append(f'  compiled together with: {", ".join(info["calls"])}')
-        if not shutil.which('rustc'):
-            lines.append('  warning: rustc is not on PATH, so calls will run as plain Python until Rust is installed.')
+        rust=toolchain.check_rust()
+        if not rust['ok']:
+            lines.append(f'  warning: {rust["problem"]} Calls run as plain Python until it is fixed:')
+            lines += [f'    {step}' for step in rust['fix']]
     if backend:
         lines.append(f'  current backend: {backend}')
     if reasons:
-        lines.append('  fallbacks so far: '+'; '.join(f'{r} ({c}x)' for r,c in reasons.items()))
+        lines.append('  fallbacks so far: '+'; '.join(f'{r.splitlines()[0]} ({c}x)' for r,c in reasons.items()))
     return '\n'.join(lines)
 
 def _plain_python(fn,max_iterations):
@@ -165,7 +173,7 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
         compile_lock=threading.RLock();metrics_lock=threading.Lock()
         state={'backend':'pending','reason':None,'compile_error':None,'native_calls':0,'fallback_calls':0,
                'calls':0,'cache_hit':False,'cache_rebuilt':False,'compile_seconds':0.0,'native_seconds':0.0,
-               'fallback_seconds':0.0,'wrapper_seconds':0.0,'compile_attempts':0}
+               'fallback_seconds':0.0,'wrapper_seconds':0.0,'compile_attempts':0,'toolchain_problem':False}
         reasons=Counter()
         warned=set()
         loaded=None;model=None;source=None;attempted=False;worker=None
@@ -189,16 +197,25 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
             data['dispatch']='wrapper';data['call_counting']=True
             return data
 
-        def python_call(reason,args,kwargs):
+        def python_call(reason,args,kwargs,toolchain_problem=False):
             with metrics_lock:
                 state['reason']=reason
-                first=reason not in warned
-                warned.add(reason)
+                if toolchain_problem:
+                    first=reason not in _TOOLCHAIN_WARNED
+                    _TOOLCHAIN_WARNED.add(reason)
+                else:
+                    first=reason not in warned
+                    warned.add(reason)
             if not fallback:
                 raise OptimizationError(reason)
             if warn_on_fallback and first and reason!='background compilation in progress':
-                warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}',
-                              PyRustFallbackWarning,stacklevel=3)
+                if toolchain_problem:
+                    warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}\n'
+                                  '(Shown once: this applies to every @optimize function until Rust works.)',
+                                  RustToolchainWarning,stacklevel=3)
+                else:
+                    warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}',
+                                  PyRustFallbackWarning,stacklevel=3)
             start=time.perf_counter()
             try:
                 return fn(*args,**kwargs)
@@ -234,10 +251,10 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                 try:
                     description=Compiler(fn,max_iterations)
                     source=description.generate()
-                    compiler=shutil.which('rustc')
+                    compiler=toolchain.find_rustc()
                     if not compiler:
-                        raise Unsupported('rustc is not installed or not on PATH')
-                    version=subprocess.check_output([compiler,'-vV'],text=True,timeout=15)
+                        raise toolchain.not_found_error()
+                    version=toolchain.rustc_version(compiler)
                     key=hashlib.sha256((source+version+platform.platform()+'abi3-O3-ed2021').encode()).hexdigest()
                     root=cache_root(cache_dir)
                     with process_lock(root/(key+'.lock')):
@@ -262,10 +279,12 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                               description.guards,description.code_guards,
                               tuple(p in description.written for p in param_names),
                               description.return_type=='none')
-                    update(backend='rust',reason=None,compile_error=None,cache_hit=hit,cache_rebuilt=rebuilt)
+                    update(backend='rust',reason=None,compile_error=None,cache_hit=hit,cache_rebuilt=rebuilt,
+                           toolchain_problem=False)
                 except Exception as exc:  # any compiler/loader failure means Python fallback
                     loaded=None;snapshot=None
-                    update(backend='python',reason=str(exc),compile_error=str(exc))
+                    update(backend='python',reason=str(exc),compile_error=str(exc),
+                           toolchain_problem=isinstance(exc,ToolchainError))
                 finally:
                     with metrics_lock:
                         state['compile_seconds']+=time.perf_counter()-start
@@ -357,7 +376,8 @@ def optimize(function=None, *, backend='rust', fallback=True, cache_dir=None, ma
                     compile_once()
                     active=snapshot
                     if active is None:
-                        return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs)
+                        return python_call(report()['compile_error'] or 'native backend unavailable',args,kwargs,
+                                           toolchain_problem=state.get('toolchain_problem',False))
                 # Holding `active` keeps the library loaded for the duration of the call.
                 lib,entry,output,kinds,guards,code_guards,written,returns_none=active
                 for namespace,builtin_ns,name,expected in guards:

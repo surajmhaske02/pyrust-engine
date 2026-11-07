@@ -33,6 +33,7 @@ def check_file(path, max_iterations=10_000_000):
 def main():
     parser=argparse.ArgumentParser(prog='python -m pyrust_engine',description='PyRust Engine developer tools')
     commands=parser.add_subparsers(dest='command',required=True)
+    commands.add_parser('doctor',help='Check Python, Rust, the C linker and NumPy, with one real test compile')
     p=commands.add_parser('check',help='Explain which functions in a trusted file compile to Rust, and why not')
     p.add_argument('script');p.add_argument('--json',action='store_true')
     p=commands.add_parser('profile',help='Execute a trusted script once; rank native candidates')
@@ -41,6 +42,9 @@ def main():
     p.add_argument('--directory');p.add_argument('--days',type=float,default=30)
     p.add_argument('--delete',action='store_true')
     args=parser.parse_args()
+    if args.command=='doctor':
+        from .toolchain import doctor
+        raise SystemExit(0 if doctor() else 1)
     if args.command=='check':
         results=check_file(args.script)
         if args.json:

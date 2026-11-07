@@ -83,6 +83,10 @@ def compile_library(root,key,compiler,source):
                                '-C','opt-level=3','-C','panic=abort','-o',str(binary)],
                               capture_output=True,text=True,timeout=120)
         if result.returncode:
+            from .toolchain import classify_build_failure
+            problem=classify_build_failure(result.stderr)
+            if problem is not None:
+                raise problem
             raise RuntimeError('Rust compilation failed: '+result.stderr[-3000:])
         sha=digest(binary)
         path=root/(key+'-'+sha+SUFFIX)

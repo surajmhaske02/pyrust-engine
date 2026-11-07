@@ -95,6 +95,8 @@ class Explain(unittest.TestCase):
         self.assertIn('helper_sum', fn.explain())
 
     def test_fallback_warning_once_per_reason(self):
+        from pyrust_engine import runtime
+        runtime._TOOLCHAIN_WARNED.clear()  # toolchain warnings are once per process
         fn = optimize(k.int_ops)
         with patch('shutil.which', return_value=None):
             with warnings.catch_warnings(record=True) as caught:

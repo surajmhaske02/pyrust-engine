@@ -3,7 +3,7 @@
 [![Tests](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml/badge.svg)](https://github.com/surajmhaske02/pyrust-engine/actions/workflows/test.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.12%20%7C%203.13-blue)
 ![Status](https://img.shields.io/badge/status-experimental-orange)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/surajmhaske02/pyrust-engine/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/pyrust-engine)](https://pypi.org/project/pyrust-engine/)
 
 **Make your Python code faster by adding one line.**
@@ -15,7 +15,7 @@ Put `@optimize` above a function. PyRust turns that function into Rust, compiles
 - 🛟 **Never get a wrong answer.** Big integers, math errors and anything unsupported fall back to normal Python with the exact same result.
 - 🔍 **See what's happening.** `fn.explain()` and a one-time warning tell you which line can't be sped up, and why.
 
-📖 [API reference](docs/API.md) · 📓 [Try it in a notebook](examples/pyrust_vs_python.ipynb) · 🤝 [Contributing](CONTRIBUTING.md) · 📝 [Changelog](CHANGELOG.md)
+📖 [API reference](https://github.com/surajmhaske02/pyrust-engine/blob/main/docs/API.md) · 📓 [Try it in a notebook](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/pyrust_vs_python.ipynb) · 🤝 [Contributing](https://github.com/surajmhaske02/pyrust-engine/blob/main/CONTRIBUTING.md) · 📝 [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md)
 
 Good fits: scientific and engineering formulas, finance and statistics, simulations, games and physics, signal processing, hashing and checksums, and number-heavy data processing.
 
@@ -117,7 +117,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ### Speed
 
-![Speedup versus plain Python](docs/benchmark-speedup.svg)
+![Speedup versus plain Python](https://cdn.jsdelivr.net/gh/surajmhaske02/pyrust-engine@main/docs/benchmark-speedup.svg)
 
 | Workload | Python | **PyRust 0.6** | PyRust vs Python |
 |---|---:|---:|---:|
@@ -133,7 +133,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 | Tiny function `add(a, b)`, forced native | 0.068 µs | 4.00 µs | 59× slower |
 | JSON → NumPy → kernel → JSON pipeline | 9.20 ms | **6.72 ms** | **1.37× faster** |
 
-<sub>Median of 7 warm runs, wrapper and argument conversion included. Measured by CI on a GitHub Actions `ubuntu-latest` runner: Linux x86_64, CPython 3.13.18, Rust 1.99.1, NumPy 2.5.4. Shared CI machines are noisy, so treat these as approximate. Raw samples: [`benchmarks/results-v0.6.0-ci-linux.json`](benchmarks/results-v0.6.0-ci-linux.json); older runs are in [`benchmarks/`](benchmarks/). Workloads are in [`examples/workloads.py`](examples/workloads.py). Reproduce with `python -m examples.benchmark_suite`.</sub>
+<sub>Median of 7 warm runs, wrapper and argument conversion included. Measured by CI on a GitHub Actions `ubuntu-latest` runner: Linux x86_64, CPython 3.13.18, Rust 1.99.1, NumPy 2.5.4. Shared CI machines are noisy, so treat these as approximate. Raw samples: [`benchmarks/results-v0.6.0-ci-linux.json`](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/results-v0.6.0-ci-linux.json); older runs are in [`benchmarks/`](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/). Workloads are in [`examples/workloads.py`](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/workloads.py). Reproduce with `python -m examples.benchmark_suite`.</sub>
 
 ### Speed on every platform
 
@@ -152,7 +152,7 @@ Speedup over plain Python, same CI run, Python 3.13 and Rust 1.99 on each GitHub
 | Tiny `add(a, b)` (runs as Python) | ≈1× | ≈1× | ≈1× |
 | JSON → array pipeline | 1.37× | 1.35× | 1.31× |
 
-<sub>Raw samples: [Linux](benchmarks/results-v0.6.0-ci-linux.json), [macOS](benchmarks/results-v0.6.0-ci-macos.json), [Windows](benchmarks/results-v0.6.0-ci-windows.json). Differences between platforms mostly reflect how fast plain Python is on each machine.</sub>
+<sub>Raw samples: [Linux](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/results-v0.6.0-ci-linux.json), [macOS](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/results-v0.6.0-ci-macos.json), [Windows](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/results-v0.6.0-ci-windows.json). Differences between platforms mostly reflect how fast plain Python is on each machine.</sub>
 
 **How to read this, honestly:**
 
@@ -230,7 +230,7 @@ Trade-off: a loop-free function has no wrapper, so `report()` can't count its ca
 - **Per-call overhead of ~2–4 µs** for native calls. Loop-free functions avoid it; loops with tiny inputs don't.
 - **First call compiles** (about 0.1–0.4 s per function depending on the OS, 0.02–0.05 s from the disk cache). Use `fn.prepare()` ahead of time.
 - **Arrays:** only 1-D, C-contiguous `float64` / `int64`. Writing an array copies it once per call (copy-on-write, so failures can be replayed exactly). Only the decorated function itself can write arrays, not helpers it calls.
-- **Needs `rustc` on `PATH`** on every machine that should run natively (no prebuilt wheels).
+- **Needs Rust on every machine that should run natively.** Without it, code runs as plain Python with one clear warning; see [If Rust is missing or broken](#if-rust-is-missing-or-broken).
 - **Native loops can't be interrupted** by Ctrl-C until they finish or hit `max_iterations`.
 - **No parallel loops.** One call uses one CPU core.
 - **Benchmarks come from GitHub's CI machines** (Linux x86_64, macOS arm64, Windows x86_64), which are shared and noisy. There are no numbers for ARM Linux yet.
@@ -238,33 +238,90 @@ Trade-off: a loop-free function has no wrapper, so `report()` can't count its ca
 
 ## Correctness evidence
 
-- **112 automated tests**, passing in CI on Linux, Windows and macOS with Python 3.10, 3.12 and 3.13, covering semantics, recursion (depth and budget limits), array writes (failure halfway through, overlapping and read-only arrays), `int64` arrays, exact int/float comparisons at the 2**53 and 2**63 boundaries, every 0.5 operator and `math` function at its edge cases (NaN, ±0.0, ±inf, overflow, domain errors, huge exponents and shifts), calls between functions, rebinding of globals and helpers, overflow replay, exceptions, NaN, ±0.0, infinities, array layouts, bounds, cache corruption and recovery, cross-process locking, background compilation, threads and profiling.
+- **128 automated tests**, passing in CI on Linux, Windows and macOS with Python 3.10, 3.12 and 3.13, covering semantics, recursion (depth and budget limits), array writes (failure halfway through, overlapping and read-only arrays), `int64` arrays, exact int/float comparisons at the 2**53 and 2**63 boundaries, every 0.5 operator and `math` function at its edge cases (NaN, ±0.0, ±inf, overflow, domain errors, huge exponents and shifts), calls between functions, rebinding of globals and helpers, overflow replay, exceptions, NaN, ±0.0, infinities, array layouts, bounds, cache corruption and recovery, cross-process locking, background compilation, threads and profiling.
 - **Generated-program fuzzing:** 4,000 random programs (2,000 integer + 2,000 float, using `while`, `break`, `continue`, `elif`, `//`, `%`, `/`), **32,000 calls compared with CPython, 0 mismatches**. Floats are compared by `repr`, so NaN and signed zero must match exactly. Every generated program must compile natively, so the test can't pass by quietly falling back to Python.
 - **0.5 fuzzing:** a second generator adds `**`, `& | ^ ~ << >>`, `abs`, `min`, `max`, `pow`, ternaries, float `//` `%` `**`, `int()`, `math.floor/ceil` and nine `math` functions. Its programs run on all three operating systems in CI and must match CPython exactly, including which exception is raised.
 - **Fuzzer sensitivity:** deliberately planted bugs (wrong modulo sign; `a / b` rewritten as `a * (1/b)`) were caught immediately.
 
-Details and limitations: [`VALIDATION.md`](VALIDATION.md).
+Details and limitations: [`VALIDATION.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/VALIDATION.md).
 
 ## Install
 
-Requires **Python 3.10+** and **Rust** (`rustc` on `PATH`, from <https://rustup.rs>).
+### Requirements
+
+| Needed | Version | Why | Check |
+|---|---|---|---|
+| **Python** | 3.10 or newer | runs PyRust | `python3 --version` |
+| **Rust** (`rustc`) | any recent stable | compiles your functions to native code | `rustc --version` |
+| **C linker** | system default | Rust uses it to build the library | included in the steps below |
+| NumPy | 1.24+ (optional) | only for `F64Array` / `I64Array` | `pip install "pyrust-engine[arrays]"` |
+
+**Rust is only needed for the speedup.** Without it, every decorated function still runs and gives the correct answer as plain Python, and PyRust shows **one** warning that says exactly what's wrong and how to fix it.
+
+### 1. Install Rust (one time)
+
+| OS | Commands |
+|---|---|
+| **macOS** | `xcode-select --install` (C linker, skip if already installed), then `brew install rustup && rustup default stable` |
+| **Linux** | `sudo apt install build-essential` (Fedora: `sudo dnf install gcc`), then `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with "Desktop development with C++", then `winget install Rustlang.Rustup` (or run `rustup-init.exe` from [rustup.rs](https://rustup.rs)) |
+
+Open a new terminal afterwards so `rustc` is on your `PATH`.
+
+### 2. Install PyRust Engine
 
 ```sh
 pip install pyrust-engine              # core, no dependencies
 pip install "pyrust-engine[arrays]"    # + NumPy, for F64Array / I64Array
 ```
 
-From source, with the tests and benchmarks:
+On macOS with Homebrew Python, install inside a virtual environment: `python3 -m venv ~/pyrust-env && source ~/pyrust-env/bin/activate`.
+
+### 3. Check everything works
+
+```sh
+python -m pyrust_engine doctor
+```
+
+```text
+PyRust Engine doctor
+====================
+PyRust Engine : 0.6.1
+Python        : 3.13.1 (/usr/bin/python3)
+Platform      : Darwin arm64
+Rust          : 1.99.1 (/Users/you/.cargo/bin/rustc)
+NumPy         : 2.5.4 (F64Array / I64Array available)
+Test compile  : OK (0.14 s)
+
+Everything is ready: decorated functions will run as native code.
+```
+
+If something is missing, `doctor` says what and prints the exact command to fix it. The same check is available from Python as `pyrust_engine.check_rust()` and `pyrust_engine.doctor()`.
+
+### If Rust is missing or broken
+
+PyRust recognises these cases and tells you the fix, both in the warning and in `fn.explain()`:
+
+| Problem | What PyRust tells you to run |
+|---|---|
+| Rust not installed | the install command for your OS (table above) |
+| `rustup` installed but no toolchain selected | `rustup default stable` |
+| Toolchain half-installed (interrupted download, "missing manifest") | `rustup toolchain uninstall stable && rustup default stable` |
+| macOS developer tools missing (`xcrun: error`) | `xcode-select --install` |
+| Windows linker missing (`link.exe` not found) | install Visual Studio Build Tools with C++ |
+| Linux linker missing (`cc` not found) | `sudo apt install build-essential` |
+
+PyRust also looks for `rustc` in the usual install folders (`~/.cargo/bin`, Homebrew's rustup) when it isn't on `PATH`, which often happens in Jupyter and IDEs. To use a specific compiler, set `PYRUST_RUSTC=/path/to/rustc`. After fixing Rust, restart Python (or the Jupyter kernel), or call `fn.reset()`.
+
+### From source
 
 ```sh
 git clone https://github.com/surajmhaske02/pyrust-engine.git
 cd pyrust-engine
 python -m pip install ".[arrays]"          # NumPy for array kernels
-python -m unittest discover -s tests -v    # 112 tests
+python -m unittest discover -s tests -v    # 128 tests
 python -m examples.benchmark_suite         # add ".[benchmark]" for Numba comparison
 ```
-
-Without Rust, everything still works in plain Python; `report()` says why.
 
 ## Usage
 
@@ -391,6 +448,7 @@ simulate: compiles to Rust.
 ### Find candidates in existing code
 
 ```sh
+python -m pyrust_engine doctor                                # is Python / Rust / linker ready? exact fix if not (0.6.1)
 python -m pyrust_engine check path/to/module.py               # which functions compile, and why not (0.5)
 python -m pyrust_engine profile path/to/script.py arg1 arg2   # runs the script once (trusted code only)
 python -m pyrust_engine cache --days 30                       # list old cache entries (add --delete)
@@ -437,11 +495,11 @@ python docs/make_chart.py benchmarks/my-results.json docs/benchmark-speedup.svg
 
 ## What's missing for developers (v0.6)
 
-Done in 0.6: array writes, `int64` arrays, recursion, exact int/float comparisons, type hints (`py.typed`), the [API reference](docs/API.md), the [contributor guide](CONTRIBUTING.md) with issue templates, an updated [notebook](examples/pyrust_vs_python.ipynb), GitHub Releases, benchmarks for macOS and Windows, and the [PyPI release](https://pypi.org/project/pyrust-engine/). These gaps remain:
+Done in 0.6: array writes, `int64` arrays, recursion, exact int/float comparisons, type hints (`py.typed`), the [API reference](https://github.com/surajmhaske02/pyrust-engine/blob/main/docs/API.md), the [contributor guide](https://github.com/surajmhaske02/pyrust-engine/blob/main/CONTRIBUTING.md) with issue templates, an updated [notebook](https://github.com/surajmhaske02/pyrust-engine/blob/main/examples/pyrust_vs_python.ipynb), GitHub Releases, benchmarks for macOS and Windows, and the [PyPI release](https://pypi.org/project/pyrust-engine/). These gaps remain:
 
 | Missing | Why it matters to a developer |
 |---|---|
-| **Needs Rust installed on every machine** | PyRust compiles *your* functions, so `rustc` is needed wherever they should run natively. Without it, code still runs as plain Python. |
+| **Needs Rust installed on every machine** | PyRust compiles *your* functions, so `rustc` is needed wherever they should run natively. Without it, code still runs as plain Python, and `python -m pyrust_engine doctor` shows the exact fix. |
 | **Lists, tuples, dicts and strings** | Code that builds lists or returns several values still runs as plain Python. |
 | **2-D arrays and other dtypes** | Only 1-D `float64` / `int64` arrays are compiled. |
 | **Call overhead** | Each native call costs about 2–4 µs, which matters for small inputs called very often. |
@@ -457,8 +515,8 @@ What needs improving, most impactful first:
 5. **Adaptive dispatch.** Measure native vs Python time for the first calls and route small inputs (e.g. `n = 3`) to Python automatically.
 6. **Benchmarks on ARM Linux**, and against Cython, PyPy and Codon.
 
-See [`CHANGELOG.md`](CHANGELOG.md) for release history.
+See [`CHANGELOG.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md) for release history.
 
 ## License
 
-[MIT](LICENSE) © 2026 Suraj Mhaske
+[MIT](https://github.com/surajmhaske02/pyrust-engine/blob/main/LICENSE) © 2026 Suraj Mhaske

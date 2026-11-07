@@ -1,10 +1,11 @@
-# PyRust Engine API reference (0.6)
+# PyRust Engine API reference (0.6.1)
 
 Everything public is importable from `pyrust_engine`:
 
 ```python
 from pyrust_engine import (optimize, F64Array, I64Array, OptimizedFunction,
-                           OptimizationError, PyRustFallbackWarning, Unsupported, prune_cache)
+                           OptimizationError, PyRustFallbackWarning, RustToolchainWarning,
+                           check_rust, doctor, Unsupported, prune_cache)
 ```
 
 ## `optimize`
@@ -48,6 +49,7 @@ h = optimize(plain_function)          # also works as a function call
 | Field | Meaning |
 |---|---|
 | `backend` | `'rust'`, `'python'`, `'pending'` (not compiled yet) or `'compiling'`. |
+| `toolchain_problem` | `True` when the last compile failed because Rust or the linker is missing or broken. |
 | `dispatch` | `'wrapper'` (normal) or `'python-direct'` (loop-free function running as plain Python with no wrapper). |
 | `call_counting` | `False` for `python-direct` functions, whose calls are not counted. |
 | `reason` | Why the latest call ran as Python, or `None`. |
@@ -91,13 +93,36 @@ In every case the call is run (or re-run) as plain Python, so the result or exce
 
 ## Warnings and errors
 
-- `PyRustFallbackWarning` (subclass of `RuntimeWarning`): emitted once per reason per function. Silence with `warn_on_fallback=False` or `warnings.filterwarnings('ignore', category=PyRustFallbackWarning)`.
+- `PyRustFallbackWarning` (subclass of `RuntimeWarning`): emitted once per reason per function.
+- `RustToolchainWarning` (subclass of `PyRustFallbackWarning`): Rust is missing or broken. Emitted **once per process**, because it affects every function; the message includes the fix. Silence with `warn_on_fallback=False` or `warnings.filterwarnings('ignore', category=PyRustFallbackWarning)`.
 - `OptimizationError`: raised instead of falling back when `fallback=False`.
 - `Unsupported`: raised by the compiler internally; you see it as a fallback reason or in `explain()`.
+
+## Checking the Rust toolchain
+
+```python
+pyrust_engine.check_rust()
+# {'ok': True, 'rustc': '/Users/you/.cargo/bin/rustc', 'version': '1.99.1', 'problem': None, 'fix': []}
+
+pyrust_engine.doctor()      # prints a full report and does one real test compile; returns True/False
+```
+
+When Rust is missing or broken, `check_rust()` returns `ok: False`, a one-line `problem` and the `fix` commands. PyRust finds `rustc` on `PATH`, then in `$CARGO_HOME/bin`, `~/.cargo/bin` and Homebrew's rustup folder. Set `PYRUST_RUSTC` to force a specific compiler.
+
+| Problem detected | Fix suggested |
+|---|---|
+| rustc not found | OS-specific install commands |
+| no default toolchain | `rustup default stable` |
+| half-installed toolchain | `rustup toolchain uninstall stable && rustup default stable` |
+| rustc hangs or won't start | `rustup default stable` / `rustup update stable` |
+| macOS developer tools missing | `xcode-select --install` |
+| Windows `link.exe` missing | Visual Studio Build Tools with C++ |
+| Linux `cc` missing | `sudo apt install build-essential` |
 
 ## Command line
 
 ```sh
+python -m pyrust_engine doctor                     # Python, Rust, linker, NumPy + a test compile
 python -m pyrust_engine check file.py [--json]     # explain every function in a file
 python -m pyrust_engine profile script.py [args]    # run a script once, rank hot functions
 python -m pyrust_engine cache [--days 30] [--delete] [--directory DIR]

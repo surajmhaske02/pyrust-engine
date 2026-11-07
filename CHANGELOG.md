@@ -1,3 +1,22 @@
+# 0.6.1
+
+Clear, actionable handling of missing or broken Rust installs.
+
+- **Diagnosis with the exact fix** for: Rust not installed, rustup without a selected
+  toolchain, a half-installed toolchain ("missing manifest"), rustc that won't start or
+  hangs, and missing C linkers (macOS command line tools, Windows Build Tools, Linux
+  `cc`). Each message says that results are still correct as plain Python.
+- **One warning per process** (`RustToolchainWarning`, a `PyRustFallbackWarning`) for
+  toolchain problems instead of one per function.
+- **`python -m pyrust_engine doctor`**: checks Python, Rust, NumPy and runs one real test
+  compile; exit code 0 when native code works. Also `pyrust_engine.doctor()` and
+  `pyrust_engine.check_rust()`.
+- **Finds rustc outside `PATH`** in the usual install folders (`~/.cargo/bin`, Homebrew's
+  rustup), which Jupyter and IDEs often miss; `PYRUST_RUSTC` selects a specific compiler.
+- `fn.explain()` shows the toolchain problem and fix; `report()` has `toolchain_problem`.
+- README: requirements table, per-OS install steps, troubleshooting table, and absolute
+  links so the PyPI page shows the chart and links correctly.
+
 # 0.6.0
 
 Recursion, writing into arrays, int64 arrays, exact int/float comparisons, type hints,
