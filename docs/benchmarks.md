@@ -4,19 +4,33 @@ Speedup over plain Python, measured by CI on GitHub Actions runners with Python 
 
 | Workload | Linux x86_64 | macOS arm64 | Windows x86_64 |
 |---|---:|---:|---:|
-| Integer loop | 35.9x | 39.5x | 37.5x |
-| Float recurrence | 12.0x | 5.3x | 8.9x |
-| Array kernel (read) | 73.8x | 37.8x | 69.7x |
-| Write into an output array | 179x | 128x | 152x |
-| Recursive `fib(25)` | 15.1x | 17.0x | 19.9x |
-| `math` functions loop | 10.6x | 15.3x | 15.5x |
-| Helper function in a loop | 68.1x | 87.2x | 61.6x |
-| Bit-mixing hash | 126x | 60.0x | 131x |
+| Integer loop | 31x | 39x | 29x |
+| Float recurrence | 14x | 5.7x | 7.8x |
+| Array kernel (read) | 85x | 42x | 86x |
+| Write into an output array | 89x | 73x | 44x |
+| Recursive `fib(25)` | 12x | 13x | 12x |
+| `math` functions loop | 11x | 14x | 15x |
+| Helper function in a loop | 64x | 91x | 83x |
+| Bit-mixing hash | 112x | 72x | 104x |
 | Tiny `add(a, b)` | ≈1x (runs as Python) | ≈1x | ≈1x |
 
 ## Compared with Numba
 
-The CI job `numba-comparison` runs the same workloads with Numba (`fastmath=False`) and uploads the timings. Numba is a mature JIT and is usually faster on the same kernels; PyRust's trade-offs are different:
+The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12. Speedup over plain Python in that run:
+
+| Workload | PyRust 0.7 | Numba |
+|---|---:|---:|
+| Integer loop | 28x | 53x |
+| Float recurrence | 8.0x | 8.0x |
+| Array kernel (read) | 62x | 164x |
+| `math` functions loop | 11x | 10x |
+| Helper function in a loop | 75x | fails: the helper isn't `@njit` |
+| Bit-mixing hash | 85x | 116x |
+| Recursive `fib(25)` | 10x | fails: recursion through a plain Python global |
+| Write into an output array | 58x | 823x |
+| Tiny `add(a, b)` | 1.0x | 0.25x (slower than Python) |
+
+Numba is a mature LLVM JIT and is faster on simple numeric kernels, especially dense array writes. PyRust matches it on math-heavy and float code, runs code Numba rejects, and never changes results. The trade-offs:
 
 | | PyRust | Numba |
 |---|---|---|

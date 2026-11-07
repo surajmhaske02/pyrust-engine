@@ -27,6 +27,11 @@ array writes, parallel loops, deployment without Rust, and better tooling.
   limit, and Ctrl-C stops them. `max_iterations=N` still sets a hard limit.
 - Array writes use an undo log instead of copying the whole array on every call.
 - Rust panics are caught and replayed in Python instead of aborting the process.
+- Per-call timing is opt-in (`timing=True`), which trims the wrapper. A faster call path
+  than `ctypes` is still on the roadmap (native calls cost about 2–3 µs).
+- Benchmarks (Linux CI): writing an output array is 89x faster than Python (0.6: 179x,
+  which copied the whole array on every call; the undo log avoids that copy for sparse
+  writes and switches to one snapshot for dense ones).
 - Comparisons between ints above 2**53 and floats replay in Python (exact for both
   Python floats and NumPy scalars).
 

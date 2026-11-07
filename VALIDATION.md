@@ -1,6 +1,6 @@
 # Validation
 
-## 0.4.0 to 0.6.0: CI on three operating systems, 6 November 2026
+## 0.4.0 to 0.7.0: CI on three operating systems, 6–7 November 2026
 
 From 0.4.0 on, every push runs the full test suite in GitHub Actions on **Linux, Windows and macOS**, each with **Python 3.10, 3.12 and 3.13** (9 jobs), with Rust stable. Each job also runs a larger generated-program fuzz pass (`PYRUST_FUZZ_PROGRAMS=150`) and the benchmark suite, and uploads the benchmark results as an artifact.
 
@@ -9,6 +9,7 @@ From 0.4.0 on, every push runs the full test suite in GitHub Actions on **Linux,
 | 0.4.0 | 56 | 9/9 jobs passed | Loop-free functions run as plain Python; fixed two test-only failures on Windows (loaded DLLs can't be deleted or replaced) and macOS (Rust builds aren't byte-identical) |
 | 0.5.0 | 89 | 9/9 jobs passed | Edge-case tests for every new operator and `math` function; extended fuzzer with `**`, bit operations, `abs`/`min`/`max`, ternaries, float `//` `%` `**`, `int()`, `math.floor/ceil` and nine `math` functions, compared with CPython on all three operating systems |
 | 0.6.0 | 112 | 9/9 test jobs + package build passed | Recursion (depth and budget limits), array writes with copy-on-write (failure mid-call, overlapping arrays, read-only arrays), `I64Array`, exact int/float comparisons at 2**53 and 2**63 boundaries, package build check |
+| 0.7.0 | 150 | 15/15 test jobs (Python 3.10–3.15) + lint + mypy + package build + Numba comparison passed | Bools, iteration, tuples, keyword/default arguments, specialization per argument type, 2-D and new arrays, undo-log writes that fail halfway, `prange` (exactness rules), Ctrl-C on long calls, prebuilt libraries without Rust, Jupyter magics, cache cleanup |
 
 Notes:
 

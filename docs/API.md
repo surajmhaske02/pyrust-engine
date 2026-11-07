@@ -1,9 +1,9 @@
-# PyRust Engine API reference (0.6.1)
+# PyRust Engine API reference (0.7)
 
 Everything public is importable from `pyrust_engine`:
 
 ```python
-from pyrust_engine import (optimize, F64Array, I64Array, OptimizedFunction,
+from pyrust_engine import (optimize, prange, F64Array, I64Array, F64Array2, I64Array2, OptimizedFunction,
                            OptimizationError, PyRustFallbackWarning, RustToolchainWarning,
                            check_rust, doctor, Unsupported, prune_cache)
 ```
@@ -14,8 +14,8 @@ from pyrust_engine import (optimize, F64Array, I64Array, OptimizedFunction,
 @optimize
 def f(...): ...
 
-@optimize(fallback=True, cache_dir=None, max_iterations=10_000_000,
-          native_loop_free=False, warn_on_fallback=True)
+@optimize(fallback=True, cache_dir=None, max_iterations=None,
+          native_loop_free=False, warn_on_fallback=True, timing=False)
 def g(...): ...
 
 h = optimize(plain_function)          # also works as a function call
@@ -25,7 +25,8 @@ h = optimize(plain_function)          # also works as a function call
 |---|---|---|
 | `fallback` | `True` | When a call can't run natively, run it as plain Python. `False` raises `OptimizationError` instead (useful in benchmarks and tests). |
 | `cache_dir` | `~/.cache/pyrust_engine` | Where compiled libraries are stored. Must be private to you on Linux/macOS. |
-| `max_iterations` | `10_000_000` | Native budget: every loop iteration and every call between compiled functions spends one unit. A call that runs out is replayed in Python. |
+| `max_iterations` | `None` | `None`: no limit. Calls longer than 50M steps re-run in a background thread with no limit, and Ctrl-C stops them. An int sets a hard budget of loop iterations and calls; a call that exceeds it is replayed in Python. |
+| `timing` | `False` | Record native and fallback timings in `report()` (small per-call cost). |
 | `native_loop_free` | `False` | Functions with no loop and no calls run as plain Python because native dispatch would be slower. `True` compiles them anyway. |
 | `warn_on_fallback` | `True` | Emit `PyRustFallbackWarning` the first time each distinct reason makes a call run as plain Python. |
 | `backend` | `'rust'` | Only `'rust'` exists. |
@@ -41,7 +42,7 @@ h = optimize(plain_function)          # also works as a function call
 | `fn.report()` | `dict` | Counters and timings (see below). |
 | `fn.prepare(background=False)` | `dict` | Compile now. With `background=True`, compile in a thread; calls run as Python until it's ready. |
 | `fn.reset()` | `dict` | Forget the compiled library and compile again on the next call. |
-| `fn.rust_source()` | `str` | The generated Rust code. |
+| `fn.rust_source(kinds=None)` | `str` | The generated Rust code (for the first compiled argument types, or the given kinds tuple). |
 | `fn.python` | function | The original, undecorated function. |
 
 ## `report()` fields
@@ -57,6 +58,8 @@ h = optimize(plain_function)          # also works as a function call
 | `calls`, `native_calls`, `fallback_calls` | Call counters. A native attempt that is then replayed counts in both `native_calls` and `fallback_calls`. |
 | `fallback_reasons` | `{reason: count}` for every fallback so far. |
 | `fallback_rate` | `fallback_calls / calls`. |
+| `specializations` | Argument-type combinations compiled so far, e.g. `[['i64', 'f64']]`. |
+| `long_calls` | Calls that ran past the inline budget in the background thread. |
 | `compile_seconds`, `compile_attempts` | Time spent compiling, and how many times. |
 | `cache_hit`, `cache_rebuilt` | Whether the library came from the disk cache, and whether a corrupt cache entry was rebuilt. |
 | `native_seconds`, `native_average_seconds` | Time inside native code. |
@@ -65,14 +68,21 @@ h = optimize(plain_function)          # also works as a function call
 
 ## Parameter and return types
 
-| Annotation | Native type | Accepted values |
-|---|---|---|
-| none or `int` | 64-bit integer | exact `int` between -2**63 and 2**63-1 (not `bool`) |
-| `float` | 64-bit float | exact `float` |
-| `F64Array` | `float64` array | 1-D, C-contiguous, aligned, native-endian NumPy `float64` array |
-| `I64Array` | `int64` array | same, `int64` |
+A function is compiled once per combination of argument types it is actually called with. Annotations are optional; they are used by `prepare()`, `explain()`, `build` and recursion.
 
-Anything else passed at call time runs as plain Python. Return annotations are only needed for recursive functions (`-> int` or `-> float`). A function with no `return value` returns `None`.
+| Python value | Native type | Annotation (optional) |
+|---|---|---|
+| `int` between -2**63 and 2**63-1 | 64-bit integer | `int` |
+| `float` | 64-bit float | `float` |
+| `bool` | bool | `bool` |
+| NumPy `float64` 1-D / 2-D, C-contiguous | array | `F64Array` / `F64Array2` |
+| NumPy `int64` 1-D / 2-D, C-contiguous | array | `I64Array` / `I64Array2` |
+
+Return values: one scalar type, a tuple of scalars, a new NumPy array created in the function, or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
+
+## `prange`
+
+`prange(stop)` / `prange(start, stop)` is `range` in plain Python. Under PyRust its iterations run on several threads, accepted only when each iteration writes its own array element (`out[i]`), reads written arrays only at `[i]`, and updates shared values only with `+=` on ints.
 
 ## Fallback reasons and native statuses
 
@@ -83,7 +93,9 @@ Anything else passed at call time runs as plain Python. Return annotations are o
 | `array index out of bounds` | `a[i]` outside the array. |
 | `native iteration budget exceeded` | More than `max_iterations` loop iterations or calls. |
 | `no scalar return` | A value-returning function reached its end without `return`. |
-| `value outside the native fast path ...` | Math domain errors, float overflow, negative integer exponents, huge int division, recursion deeper than 300 levels. |
+| `value outside the native fast path ...` | Math domain errors, float overflow, negative integer exponents, huge int division, int/float comparisons beyond 2**53, recursion deeper than 300 levels. |
+| `interrupted` | Ctrl-C during a long call (raised as `KeyboardInterrupt`). |
+| `internal error in generated code` | A Rust panic, caught and replayed in Python. Please report it. |
 | `<name> has been rebound` | A builtin, `math`, global constant or helper function was reassigned after compiling. |
 | `<param>: expected ...` | An argument had a type or array layout the native code can't take. |
 | `array arguments share memory ...` | A written array overlaps another array argument. |
@@ -123,12 +135,30 @@ When Rust is missing or broken, `check_rust()` returns `ok: False`, a one-line `
 
 ```sh
 python -m pyrust_engine doctor                     # Python, Rust, linker, NumPy + a test compile
+python -m pyrust_engine build file.py [--out DIR]   # compile ahead of time into __pyrust__/
 python -m pyrust_engine check file.py [--json]     # explain every function in a file
 python -m pyrust_engine profile script.py [args]    # run a script once, rank hot functions
 python -m pyrust_engine cache [--days 30] [--delete] [--directory DIR]
 ```
 
 `check` loads the file without running its `if __name__ == "__main__":` block. `profile` runs the script. Only use either on trusted code.
+
+## Jupyter
+
+```python
+%load_ext pyrust_engine
+%pyrust_check fn                # explain()
+%pyrust_benchmark fn(args)      # time plain Python vs PyRust, check results match
+```
+
+## Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `PYRUST_RUSTC` | Use this `rustc`. |
+| `PYRUST_CACHE_DIR` | Cache folder (default `~/.cache/pyrust_engine`). |
+| `PYRUST_CACHE_MAX_AGE_DAYS` | Remove cache entries unused this long (default 30, `0` = never). |
+| `PYRUST_PREBUILT` | Extra folders with prebuilt libraries (`os.pathsep`-separated). |
 
 ## `prune_cache`
 
