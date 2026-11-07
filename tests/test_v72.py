@@ -67,7 +67,10 @@ class Packing(unittest.TestCase):
         ):
             self.assertEqual(unpack(kind, pack(kind, value)), value)
         raw = 'one 🙂'.encode('utf-32-le')
-        self.assertEqual(unpack('strv', len('one 🙂').to_bytes(8, 'little') * 2 + raw), 'one 🙂')
+        header = (2**64 - 1).to_bytes(8, 'little') + len('one 🙂').to_bytes(8, 'little') * 2
+        self.assertEqual(unpack('strv', header + raw), 'one 🙂')
+        joined = '\x00'.join(['ab', '', 'c']).encode('utf-32-le')
+        self.assertEqual(unpack('slist', (3).to_bytes(8, 'little') + bytes(8) + (5).to_bytes(8, 'little') + joined), ['ab', '', 'c'])
 
 
 @unittest.skipUnless(NUMPY, 'NumPy required')

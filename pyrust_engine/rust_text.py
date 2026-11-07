@@ -34,22 +34,42 @@ impl std::hash::Hasher for FastHasher {
     #[inline] fn finish(&self)->u64{fold(self.0,0xA0761D6478BD642F)}
 }
 pub type HSet<K>=HashSet<K,FastState>;
-// Strings are Unicode code points, shared and copied on write (s += t is amortized O(1)).
-#[derive(Clone,PartialEq,Eq,PartialOrd,Ord,Default)]
-pub struct S(std::sync::Arc<Vec<u32>>);
+// Strings are Unicode code points. Up to 7 are stored inline (no allocation: most words);
+// longer ones are shared and copied on write, so s += t is amortized O(1) like CPython.
+#[derive(Clone)]
+pub enum S { Small(u8,[u32;7]), Big(std::sync::Arc<Vec<u32>>) }
+impl Default for S { fn default()->S{S::Small(0,[0;7])} }
+impl std::ops::Deref for S {
+    type Target=[u32];
+    #[inline] fn deref(&self)->&[u32]{match self {S::Small(n,d)=>&d[..*n as usize], S::Big(a)=>&a[..]}}
+}
+impl PartialEq for S { #[inline] fn eq(&self,o:&S)->bool{**self==**o} }
+impl Eq for S {}
+impl PartialOrd for S { fn partial_cmp(&self,o:&S)->Option<std::cmp::Ordering>{Some(self.cmp(o))} }
+impl Ord for S { fn cmp(&self,o:&S)->std::cmp::Ordering{(**self).cmp(&**o)} }
 impl std::hash::Hash for S {
-    fn hash<H:std::hash::Hasher>(&self,h:&mut H){
-        let v:&[u32]=&self.0;
+    #[inline] fn hash<H:std::hash::Hasher>(&self,h:&mut H){
+        let v:&[u32]=self;
         h.write(unsafe{std::slice::from_raw_parts(v.as_ptr() as *const u8,v.len()*4)});
     }
 }
-impl std::ops::Deref for S { type Target=[u32]; fn deref(&self)->&[u32]{&self.0} }
-fn sv(v:&[u32])->S{S(std::sync::Arc::new(v.to_vec()))}
-fn sown(v:Vec<u32>)->S{S(std::sync::Arc::new(v))}
+#[inline] fn sv(v:&[u32])->S{
+    if v.len()<=7 {let mut d=[0u32;7]; d[..v.len()].copy_from_slice(v); S::Small(v.len() as u8,d)}
+    else {S::Big(std::sync::Arc::new(v.to_vec()))}
+}
+fn sown(v:Vec<u32>)->S{if v.len()<=7 {sv(&v)} else {S::Big(std::sync::Arc::new(v))}}
 fn sl(a:&Arr<u32>)->&[u32]{if a.len==0 {&[]} else {unsafe{std::slice::from_raw_parts(a.ptr,a.len)}}}
 fn av<T:Copy>(a:&Arr<T>)->&[T]{if a.len==0 {&[]} else {unsafe{std::slice::from_raw_parts(a.ptr,a.len)}}}
 fn avm<T:Copy>(a:&mut Arr<T>)->&mut [T]{if a.len==0 {&mut []} else {unsafe{std::slice::from_raw_parts_mut(a.ptr,a.len)}}}
-fn s_push(s:&mut S,t:&[u32]){std::sync::Arc::make_mut(&mut s.0).extend_from_slice(t);}
+fn s_push(s:&mut S,t:&[u32]){
+    if let S::Small(n,d)=s {
+        let k=*n as usize;
+        if k+t.len()<=7 {d[k..k+t.len()].copy_from_slice(t); *n=(k+t.len()) as u8; return}
+        let mut v=Vec::with_capacity((k+t.len()).max(16)); v.extend_from_slice(&d[..k]); v.extend_from_slice(t);
+        *s=S::Big(std::sync::Arc::new(v)); return
+    }
+    if let S::Big(a)=s {std::sync::Arc::make_mut(a).extend_from_slice(t);}
+}
 fn s_cat(a:&[u32],b:&[u32])->S{let mut v=Vec::with_capacity(a.len()+b.len()); v.extend_from_slice(a); v.extend_from_slice(b); sown(v)}
 fn s_at(s:&[u32],i:i64)->Result<u32,i32>{let j=index(s.len(),i)?; Ok(s[j])}
 fn v_at<T:Clone>(v:&[T],i:i64)->Result<T,i32>{let j=index(v.len(),i)?; Ok(v[j].clone())}
@@ -267,12 +287,37 @@ impl Col for f64{fn put(w:&mut Wr,v:&[f64]){for &x in v {w.u(x.to_bits())}} fn g
 impl Col for bool{fn put(w:&mut Wr,v:&[bool]){for &x in v {w.u(x as u64)}} fn get(r:&mut Rd,n:usize)->Vec<bool>{(0..n).map(|_| r.u()!=0).collect()}}
 impl Col for S{
     fn put(w:&mut Wr,v:&[S]){
-        let total:usize=v.iter().map(|s| s.len()).sum(); w.u(total as u64);
-        for s in v {w.u(s.len() as u64)}
-        for s in v {for &c in s.iter() {w.b.extend_from_slice(&c.to_le_bytes())}}
+        // [separator][total][code points with the separator between strings]; Python splits in C.
+        // The separator is a code point no string contains (lengths are sent instead if none is free).
+        let mut used=[false;64];
+        for x in v {for &c in x.iter() {if c<64 {used[c as usize]=true}}}
+        let sep=(0..64u32).find(|&c| !used[c as usize]);
+        match sep {
+            Some(c)=>{
+                w.u(c as u64);
+                let total:usize=v.iter().map(|s| s.len()).sum::<usize>()+v.len().saturating_sub(1); w.u(total as u64);
+                w.b.reserve(total*4);
+                for (k,x) in v.iter().enumerate() {
+                    if k>0 {w.b.extend_from_slice(&c.to_le_bytes())}
+                    for &ch in x.iter() {w.b.extend_from_slice(&ch.to_le_bytes())}
+                }
+            }
+            None=>{
+                w.u(u64::MAX);
+                let total:usize=v.iter().map(|s| s.len()).sum(); w.u(total as u64);
+                for x in v {w.u(x.len() as u64)}
+                for x in v {for &ch in x.iter() {w.b.extend_from_slice(&ch.to_le_bytes())}}
+            }
+        }
     }
     fn get(r:&mut Rd,n:usize)->Vec<S>{
-        let _total=r.u(); let lens:Vec<u64>=(0..n).map(|_| r.u()).collect();
+        let sep=r.u(); let total=r.u();
+        if sep!=u64::MAX {
+            let chars:Vec<u32>=(0..total).map(|_| r.w()).collect();
+            if n==0 {return Vec::new()}
+            return chars.split(|&c| c as u64==sep).map(sv).collect();
+        }
+        let lens:Vec<u64>=(0..n).map(|_| r.u()).collect();
         lens.iter().map(|&l| sown((0..l).map(|_| r.w()).collect())).collect()
     }
 }

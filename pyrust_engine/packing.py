@@ -2,7 +2,9 @@
 
 Layout (little-endian 64-bit words; strings as UTF-32 code points):
   column of ints / floats / bools: one word per item
-  column of strings: total characters, one length per string, then all characters
+  column of strings: a separator code point and the total, then either the strings joined
+    by the separator (from native code: Python splits them in C) or, with separator
+    2**64-1, one length per string and all characters
   list or set: item count, then one column;  dict: count, key column, value column
   single string: a column with one string
 Built with C-speed helpers (array, str.join, bytes.decode), not per-item Python code.
@@ -13,11 +15,13 @@ from array import array
 from itertools import accumulate
 
 _COUNT = struct.Struct('<Q')
+_NO_SEPARATOR = 2**64 - 1
 
 
 def _put_column(kind, values, out):
     if kind == 'strv':
         lengths = array('q', map(len, values))
+        out.append(_COUNT.pack(_NO_SEPARATOR))  # lengths follow (no separator)
         out.append(_COUNT.pack(sum(lengths)))
         out.append(lengths.tobytes())
         out.append(''.join(values).encode('utf-32-le', 'surrogatepass'))
@@ -47,8 +51,13 @@ def pack(kind, value):
 
 def _get_column(kind, data, pos, n):
     if kind == 'strv':
-        total = _COUNT.unpack_from(data, pos)[0]
-        pos += 8
+        separator = _COUNT.unpack_from(data, pos)[0]
+        total = _COUNT.unpack_from(data, pos + 8)[0]
+        pos += 16
+        if separator != _NO_SEPARATOR:
+            # Native code joined the strings with a code point none of them contains.
+            text = bytes(data[pos : pos + 4 * total]).decode('utf-32-le', 'surrogatepass')
+            return (text.split(chr(separator)) if n else []), pos + 4 * total
         lengths = array('q')
         lengths.frombytes(data[pos : pos + 8 * n])
         pos += 8 * n
