@@ -1,0 +1,32 @@
+site_name: PyRust Engine
+site_description: Make your Python code faster with one decorator
+site_url: https://surajmhaske02.github.io/pyrust-engine/
+repo_url: https://github.com/surajmhaske02/pyrust-engine
+repo_name: surajmhaske02/pyrust-engine
+edit_uri: edit/main/docs/
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/weather-sunny, name: Light mode}
+  features: [navigation.sections, navigation.top, content.code.copy, search.highlight]
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed: {alternate_style: true}
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guide: guide.md
+  - Examples: examples.md
+  - Benchmarks: benchmarks.md
+  - Deployment: deployment.md
+  - Troubleshooting: troubleshooting.md
+  - API reference: API.md

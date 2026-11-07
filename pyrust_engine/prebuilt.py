@@ -121,7 +121,7 @@ def build(script, out=None, stream=None):
         rows.append({'function': fn.__qualname__, 'ok': True, 'detail': name})
     (target / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True))
     for row in rows:
-        mark = 'built ' if row['ok'] else 'skipped'
+        mark = 'built' if row['ok'] else 'skipped'
         print(f'{mark} {row["function"]}: {row["detail"]}', file=out_stream)
     print(
         f'{sum(r["ok"] for r in rows)} of {len(rows)} functions built into {target} for {platform_tag()}',

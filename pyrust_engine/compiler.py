@@ -106,6 +106,7 @@ fn tick(c:&mut Ctx)->Result<(),i32>{
 #[derive(Clone,Copy)] struct SendPtr<T>(*mut T);
 unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
+impl<T> SendPtr<T> { fn get(self) -> *mut T { self.0 } }
 pub struct Arr<T:Copy>{ ptr:*mut T, len:usize, rows:usize, cols:usize, track:bool,
                         log:Vec<(usize,T)>, orig:Option<Vec<T>>, owned:Vec<T> }
 impl<T:Copy> Arr<T>{
@@ -1586,7 +1587,7 @@ let results{j}: Vec<Result<{part_type},i32>> = std::thread::scope(|scope| {{
     while lo < stop{j} {{
         let hi = if stop{j} - lo > chunk{j} {{ lo + chunk{j} }} else {{ stop{j} }};
         handles.push(scope.spawn(move || -> Result<{part_type},i32> {{
-            let mut ctx = Ctx{{fuel: u64::MAX, cancel: cancel{j}.0 as *const AtomicU8, ticks: 0}};
+            let mut ctx = Ctx{{fuel: u64::MAX, cancel: cancel{j}.get() as *const AtomicU8, ticks: 0}};
             let fuel = &mut ctx;
             {part_init}
             let mut i = lo;

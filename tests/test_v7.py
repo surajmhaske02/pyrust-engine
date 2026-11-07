@@ -32,6 +32,8 @@ def run(fn, args):
 
 
 def same_value(a, b):
+    if a is None or b is None:
+        return a is b
     if isinstance(a, tuple) or isinstance(b, tuple):
         return isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b) and all(
             same_value(x, y) for x, y in zip(a, b))

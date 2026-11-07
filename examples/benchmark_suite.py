@@ -67,11 +67,14 @@ def run():
             row['disk_cache_first_call_seconds']=time.perf_counter()-start
             if numba is not None and name!='tiny_scalar_forced_native':
                 # fastmath disabled; no Python big-int semantics claimed for Numba.
-                jitted=numba.njit(fn,fastmath=False)
-                start=time.perf_counter();same(expected,jitted(*args))
-                row['numba_first_call_seconds']=time.perf_counter()-start
-                row['numba']=measure(jitted,args,batch=batch)
-                row['pyrust_over_numba_time']=rust['median_seconds']/row['numba']['median_seconds']
+                try:
+                    jitted=numba.njit(fn,fastmath=False)
+                    start=time.perf_counter();same(expected,jitted(*args))
+                    row['numba_first_call_seconds']=time.perf_counter()-start
+                    row['numba']=measure(jitted,args,batch=batch)
+                    row['pyrust_over_numba_time']=rust['median_seconds']/row['numba']['median_seconds']
+                except Exception as exc:  # e.g. Numba can't call a plain Python helper
+                    row['numba_error']=str(exc).strip().splitlines()[0][:200]
             if name=='array_energy':
                 vectorized=lambda a:np.sum(a*a)
                 same(expected,vectorized(*args))
