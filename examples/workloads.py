@@ -73,3 +73,51 @@ def smooth(values: F64Array, out: F64Array):
         left = float(values[i - 1]) if i > 0 else float(values[i])
         right = float(values[i + 1]) if i < n - 1 else float(values[i])
         out[i] = (left + 2.0 * float(values[i]) + right) / 4.0
+
+
+import random
+
+
+def edit_distance(a: str, b: str) -> int:
+    # Strings (0.7.1): Levenshtein distance with two rows made by [0] * n.
+    m = len(b)
+    prev = [0] * (m + 1)
+    cur = [0] * (m + 1)
+    for j in range(m + 1):
+        prev[j] = j
+    for i in range(1, len(a) + 1):
+        cur[0] = i
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        for j in range(m + 1):
+            prev[j] = cur[j]
+    return prev[m]
+
+
+def list_variance(values: list) -> float:
+    # A plain Python list of floats (0.7.1): converted once per call.
+    mean = 0.0
+    for x in values:
+        mean += x
+    mean /= len(values)
+    spread = 0.0
+    for x in values:
+        spread += (x - mean) * (x - mean)
+    return spread / len(values)
+
+
+def monte_carlo_pi(n: int) -> float:
+    # random.random() (0.7.1): continues Python's own random sequence exactly.
+    inside = 0
+    for _ in range(n):
+        x = random.random()
+        y = random.random()
+        if x * x + y * y <= 1.0:
+            inside += 1
+    return 4.0 * inside / n
+
+
+def price_score(price: float, qty: int) -> float:
+    # A tiny one-value function, run over whole arrays with vectorize (0.7.1).
+    return price * qty * (0.9 if qty > 10 else 1.0)

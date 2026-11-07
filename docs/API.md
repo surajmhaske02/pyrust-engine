@@ -1,9 +1,9 @@
-# PyRust Engine API reference (0.7)
+# PyRust Engine API reference (0.7.1)
 
 Everything public is importable from `pyrust_engine`:
 
 ```python
-from pyrust_engine import (optimize, prange, F64Array, I64Array, F64Array2, I64Array2, OptimizedFunction,
+from pyrust_engine import (optimize, vectorize, prange, F64Array, I64Array, F64Array2, I64Array2, OptimizedFunction,
                            OptimizationError, PyRustFallbackWarning, RustToolchainWarning,
                            check_rust, doctor, Unsupported, prune_cache)
 ```
@@ -32,6 +32,29 @@ h = optimize(plain_function)          # also works as a function call
 | `backend` | `'rust'` | Only `'rust'` exists. |
 
 `optimize` returns an `OptimizedFunction`: call it exactly like the original.
+
+## `vectorize`
+
+```python
+@vectorize
+def score(price: float, qty: int) -> float: ...
+
+@vectorize(parallel=True, max_iterations=None, cache_dir=None)   # other options go to optimize
+def g(x: float) -> float: ...
+
+score(prices, quantities)     # -> numpy.ndarray
+score(df["p"], df["q"])       # -> pandas.Series with the index of the first Series
+score(prices, 2)              # numbers are reused for every element
+```
+
+Applies a function written for single values to every position of its array arguments. Array arguments can be 1-D NumPy `float64`/`int64` arrays, lists of floats or ints, or pandas Series, and must all have the same length (`ValueError` otherwise). The generated loop and the function are compiled together, so each element costs nanoseconds instead of a native call. The result dtype follows the function's return type: `float64`, `int64` or `bool`. Inputs that can't be compiled run the same loop in Python. With only plain numbers, it simply calls the function. Also available as `optimize.vectorize`.
+
+| Attribute | Description |
+|---|---|
+| `v.python` | the original function |
+| `v.explain()` | whether the function compiles, plus how it is vectorized |
+| `v.report()` | `report()` of the compiled loop used by the last call |
+| `v.rust_source()` | generated Rust of the last compiled loop |
 
 ## `OptimizedFunction` methods
 
@@ -77,8 +100,16 @@ A function is compiled once per combination of argument types it is actually cal
 | `bool` | bool | `bool` |
 | NumPy `float64` 1-D / 2-D, C-contiguous | array | `F64Array` / `F64Array2` |
 | NumPy `int64` 1-D / 2-D, C-contiguous | array | `I64Array` / `I64Array2` |
+| `list` of floats / of 64-bit ints | copied in; written lists copied back into the same object | `list[float]` / `list[int]` |
+| `str` | read-only characters (Unicode code points) | `str` |
+| `bytes` | read-only, elements are ints | `bytes` |
+| pandas `Series`, `float64` / `int64`, index `0..n-1` | read-only, no copy | `pd.Series` |
 
-Return values: one scalar type, a tuple of scalars, a new NumPy array created in the function, or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
+Return values: one scalar type, one character (`-> str`), a tuple of scalars, a new NumPy array or list created in the function (`np.zeros(n)`, `[0.0] * n`), or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
+
+## Random numbers
+
+`random.random()`, `random.uniform(a, b)`, `random.randint(a, b)`, `random.randrange(stop)`, `random.randrange(start, stop)`, `random.gauss(mu, sigma)` and `random.choice(seq)` (also imported by name) compile to the same Mersenne Twister algorithm as CPython. The shared generator's state is copied in before the call and written back after it succeeds, so results and the following sequence are identical to plain Python. If any of these module functions is replaced, calls fall back to Python (`'random has been rebound'`).
 
 ## `prange`
 

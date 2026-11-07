@@ -1,3 +1,37 @@
+# 0.7.1
+
+Everyday Python, not only numbers: lists, strings, pandas columns, random numbers, and
+`vectorize` for small functions over whole columns.
+
+**Language**
+- **Lists:** `list[float]` and `list[int]` arguments can be read, looped over and
+  written. Written lists are copied back into the same list object after the call
+  succeeds. New lists from `[0.0] * n` / `[0] * n` can be filled and returned.
+- **Strings and bytes:** `len(s)`, `s[i]`, `for ch in s`, `enumerate(s)`, character
+  comparisons, `ch in "aeiou"`, `ch in s`, `ord`, `chr`, `isdigit isalpha isalnum
+  isspace isupper islower lower upper` (exact for ASCII; other characters replay), and
+  one-character return values. `bytes` elements are ints.
+- **pandas Series** (`float64`/`int64`, default index) are read without copying:
+  `s[i]` keeps Python's label semantics (`s[-1]` raises `KeyError`), `s.iloc[i]` is
+  positional.
+- **random:** `random()`, `uniform`, `randint`, `randrange`, `gauss` and `choice`
+  continue Python's own Mersenne Twister sequence bit for bit, so `random.seed()` and
+  the following draws behave exactly as in plain Python.
+
+**New: `vectorize`**
+- `@vectorize` (or `@optimize.vectorize`) runs a one-value function over NumPy arrays,
+  lists or pandas columns in one native loop, returning a NumPy array (or a Series with
+  the same index). `parallel=True` uses all CPU cores. This is the fix for tiny
+  functions: no per-element call overhead.
+
+**Other**
+- Hints updated for the new features; the guide documents running compiled functions
+  in web servers from worker threads (compiled calls don't hold the GIL).
+- New CI benchmarks: edit distance on strings, list variance, Monte Carlo with
+  `random`, and `vectorize` versus a Python loop.
+- The generated code changed, so libraries built by `python -m pyrust_engine build`
+  with 0.7.0 are rebuilt (or run as Python until you run `build` again).
+
 # 0.7.0
 
 Everything on the improvement list: much more Python compiles, no budget trap, safer

@@ -12,7 +12,9 @@
 Put `@optimize` above a function. PyRust turns that function into Rust, compiles it and runs it as native machine code. You keep writing normal Python, and **your answers never change**: anything PyRust can't run safely runs as normal Python instead.
 
 - ✍️ **Write plain Python.** No new language, no build step, no rewrite. Type annotations are optional.
-- ⚡ **Get real speed on calculation-heavy code:** arithmetic, `math` functions, bit operations, helper functions, recursion and NumPy arrays run about **6× to 110× faster** in our tests on Linux, macOS and Windows.
+- ⚡ **Get real speed on CPU-heavy code:** arithmetic, `math` functions, bit operations, helper functions, recursion and NumPy arrays run about **6× to 110× faster** in our tests on Linux, macOS and Windows.
+- 🧰 **Use everyday Python values:** lists, strings, `bytes`, pandas columns and the `random` module compile too, with the same results as plain Python.
+- 🐼 **Speed up small functions over whole columns** with `@vectorize`: a faster replacement for `df.apply` and list comprehensions.
 - 🧵 **Use every CPU core** with `prange()` for loops whose iterations are independent.
 - 🛟 **Never get a wrong answer.** Big integers, math errors, Ctrl-C and anything unsupported fall back to normal Python with the exact same result or exception.
 - 🔍 **See what's happening.** `fn.explain()` and a one-time warning say which line can't be sped up, why, and how to rewrite it.
@@ -55,7 +57,44 @@ total_distance(300_000)                        # ~64x faster than plain Python o
 print(total_distance.explain())                # compiles? if not: which line, why, and a hint
 ```
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. 150 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
+More everyday Python (new in 0.7.1):
+
+```python
+import random
+from pyrust_engine import optimize, vectorize
+
+@optimize
+def edit_distance(a: str, b: str) -> int:      # strings and lists
+    prev = [0] * (len(b) + 1)
+    cur = [0] * (len(b) + 1)
+    for j in range(len(b) + 1):
+        prev[j] = j
+    for i in range(1, len(a) + 1):
+        cur[0] = i
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        for j in range(len(b) + 1):
+            prev[j] = cur[j]
+    return prev[len(b)]
+
+@optimize
+def monte_carlo_pi(n: int) -> float:           # same numbers as plain Python after random.seed()
+    inside = 0
+    for _ in range(n):
+        x, y = random.random(), random.random()
+        if x * x + y * y <= 1.0:
+            inside += 1
+    return 4.0 * inside / n
+
+@vectorize
+def score(price: float, qty: int) -> float:    # write it for one row...
+    return price * qty * (0.9 if qty > 10 else 1.0)
+
+df["score"] = score(df["price"], df["qty"])    # ...run it over whole pandas columns in one native loop
+```
+
+> **Status: experimental.** Not a general Python compiler and not production-hardened. TESTCOUNT tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
 
 ## Comparison at a glance
 
@@ -102,15 +141,19 @@ Float recurrences and `math`-heavy loops gain less because the floating-point wo
 
 | | |
 |---|---|
-| **Values** | `int` (64-bit, overflow-checked), `float`, `bool`, tuples (unpacking and multiple returns), NumPy `float64`/`int64` arrays (1-D and 2-D) |
+| **Values** | `int` (64-bit, overflow-checked), `float`, `bool`, tuples (unpacking and multiple returns), NumPy `float64`/`int64` arrays (1-D and 2-D), lists of floats or ints, `str`, `bytes`, pandas `float64`/`int64` Series |
 | **Operators** | `+ - * / // % **`, `& \| ^ ~ << >>`, comparisons incl. chained and exact int-vs-float |
 | **Control flow** | `if`/`elif`/`else`, `for` over `range`, an array, `enumerate` or `prange`, `while`, `break`, `continue`, `return`, `x if c else y` |
-| **Builtins** | `abs min max sum round divmod pow int float bool len` |
+| **Builtins** | `abs min max sum round divmod pow int float bool len ord chr` |
+| **Strings** | `s[i]`, `for ch in s`, comparisons, `ch in "aeiou"`, `ch.isdigit()` / `isalpha` / `isspace` / `lower()` / … (read-only) |
+| **`random`** | `random uniform randint randrange gauss choice`, exactly Python's sequence |
+| **Lists** | read, loop, write (copied back into your list), new lists with `[0.0] * n` that can be returned |
+| **pandas** | Series `s[i]`, `s.iloc[i]`, `len(s)`, `for x in s`; `@vectorize` over whole columns |
 | **`math`** | `sqrt exp log log2 log10 sin cos tan asin acos atan atan2 sinh cosh tanh fabs copysign fmod floor ceil trunc isnan isinf isfinite pi e tau inf nan` |
 | **Arrays** | `a[i]`, `a[i, j]`, `a.shape`, `len(a)`, `for x in a`, writes (`a[i] = v`, `+=`), new arrays with `np.zeros/empty/ones(_like)` that can be returned |
 | **Functions** | calls to your own functions (keyword and default arguments, recursion with a `-> int`/`-> float` annotation), module-level constants |
 
-Everything else (lists, dicts, strings, classes, `print`, `try`, slicing, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
+Everything else (dicts, sets, building strings, list methods, classes, `print`, `try`, slicing, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
 
 ## What makes Python slow, and what PyRust does about it
 
@@ -123,13 +166,15 @@ Everything else (lists, dicts, strings, classes, `print`, `try`, slicing, …) s
 | Bit manipulation creates new int objects | hashing | ✅ Native bit operations |
 | Indexing arrays goes through NumPy objects | `a[i]`, `out[i] = x` | ✅ Reads and writes array memory directly |
 | The GIL keeps one thread busy | CPU-bound loops | ✅ `prange()` runs independent iterations on all cores |
-| Crossing into native code has a fixed cost | tiny functions called millions of times | ⚠️ about 2–3 µs per native call; tiny loop-free functions skip it |
-| Lists, dicts, strings and objects are dynamic | text processing, JSON, classes | ❌ Not compiled. Use the right library, PyPy or CPython's JIT |
+| Crossing into native code has a fixed cost | tiny functions called millions of times | ✅ `@vectorize` runs them over whole arrays in one call; ⚠️ single calls still cost 2–3 µs |
+| Python values are generic objects | lists of numbers, text processing | ✅ Lists, `str`, `bytes` and pandas columns read as native memory |
+| Random numbers go through Python calls | simulations, Monte Carlo | ✅ Python's own generator algorithm, natively, same sequence |
+| Dicts, sets and objects are dynamic | JSON, classes, grouping | ❌ Not compiled. Use the right library, PyPy or CPython's JIT |
 | I/O waits | network, disk, database | ❌ Not a CPU problem: use `asyncio` or threads |
 
 ## Version comparison
 
-| | 0.5 | 0.6 | **0.7 (current)** |
+| | 0.5 | 0.6 | **0.7** |
 |---|---|---|---|
 | Values | `int`, `float`, `float64` arrays | + `int64` arrays | **+ `bool`, tuples, 2-D arrays, new arrays** |
 | Loops | `range`, `while` | same | **+ `for x in a`, `enumerate`, `prange` (multi-core)** |
@@ -143,7 +188,7 @@ Everything else (lists, dicts, strings, classes, `print`, `try`, slicing, …) s
 | Developer tools | `explain()`, warnings, `check` | + type hints, API docs | **+ hints in messages, Jupyter magics, docs website** |
 | Tests / CI | 89 / 3 OSes × 3 Pythons | 128 | **150 / 3 OSes × Python 3.10–3.15, lint, coverage, benchmark tracking** |
 
-Older releases: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
+**0.7.1 (current)** adds lists, `str`/`bytes`, pandas Series, the `random` module and `@vectorize`. Older releases: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
 
 ## Install
 
@@ -212,10 +257,40 @@ fn.rust_source()    # the generated Rust
 
 ```text
 PyRustFallbackWarning: simulate ran as plain Python: simulate, line 14: unsupported expression: `[x, y]`
-  hint: Lists aren't compiled. Pass a NumPy array (F64Array / I64Array), create one with np.zeros(n), or use separate variables.
+  hint: List literals are compiled only as [value] * n. Pass lists of numbers as arguments, or create one with [0.0] * n and fill it in a loop.
 ```
 
 In Jupyter: `%load_ext pyrust_engine`, then `%pyrust_check fn` and `%pyrust_benchmark fn(args)`.
+
+### Lists, strings, pandas and random numbers
+
+```python
+@optimize
+def double_all(values: list[int]) -> None:
+    for i in range(len(values)):
+        values[i] *= 2                         # written back into the same list after the call
+
+@optimize
+def count_digits(text: str) -> int:
+    count = 0
+    for ch in text:
+        if ch.isdigit():
+            count += 1
+    return count
+
+@optimize
+def mean_gap(prices) -> float:                 # a pandas column: mean_gap(df["price"])
+    total = 0.0
+    for i in range(1, len(prices)):
+        total += abs(prices[i] - prices[i - 1])
+    return total / (len(prices) - 1)
+```
+
+`random.random()`, `uniform`, `randint`, `randrange`, `gauss` and `choice` run Python's own Mersenne Twister algorithm natively: after `random.seed(42)` you get exactly the numbers plain Python gives, and the sequence continues correctly afterwards.
+
+### Web apps
+
+Compiled calls don't hold the GIL, so a CPU-heavy step in a FastAPI/Django/Flask endpoint can run in a worker thread (`await asyncio.to_thread(fn, ...)`) without blocking other requests. Ship [prebuilt](#deploy-without-rust) libraries so servers don't need Rust.
 
 ### Deploy without Rust
 
@@ -254,13 +329,15 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Limitations
 
-- **Numeric subset only.** No lists, dicts, sets, strings, classes, methods, closures, generators, `try`/`with`, slicing or `print` in compiled code (they run as Python).
+- **A subset of Python.** No dicts, sets, list methods (`append`), building strings, classes, methods, closures, generators, `try`/`with`, slicing or `print` in compiled code (they run as Python).
+- **Lists** are copied for each call (fast, but NumPy arrays avoid it for big data). Strings, `bytes` and pandas Series are read-only.
+- **`random`:** only the shared generator's functions listed above; not inside `prange`, and don't draw random numbers from another thread during a compiled call.
 - **`min`/`max` over mixed int and float**, `round(x, ndigits)` and `math.hypot` aren't compiled (Python's results depend on details native code can't match exactly).
 - **NumPy scalars:** in Python, `a[i]` gives `np.float64`; PyRust returns a plain `float` with the same value.
 - **Recursion** needs a return annotation and runs natively up to 300 levels deep.
 - **Per-call overhead** of about 2–3 µs for native calls (via `ctypes`). Loop-free functions skip it; loops with tiny inputs don't.
 - **First call compiles** (0.1–0.5 s, cached on disk). Use `fn.prepare()` or ship [prebuilt](#deploy-without-rust) libraries.
-- **Arrays:** 1-D and 2-D, C-contiguous `float64` / `int64` only.
+- **Arrays:** 1-D and 2-D, C-contiguous `float64` / `int64` only. pandas Series need a `float64`/`int64` dtype and the default index.
 - **`prange`** only accepts independent iterations (see above).
 - **Experimental.** Not production-hardened and not a sandbox: only run trusted code.
 
@@ -295,9 +372,9 @@ Generated Rust never contains raw user text: identifiers are mapped to internal 
 
 ```
 pyrust_engine/   compiler.py (Python AST → Rust), runtime.py (decorator, dispatch), cache.py,
-                 toolchain.py (Rust detection, doctor), prebuilt.py (ahead-of-time builds),
+                 vectorize.py (@vectorize), toolchain.py (Rust detection, doctor), prebuilt.py (ahead-of-time builds),
                  ipython.py (Jupyter magics), profiling.py, __main__.py (CLI), py.typed
-tests/           test_engine.py, test_v2.py … test_v7.py, test_toolchain.py, test_fuzz.py
+tests/           test_engine.py, test_v2.py … test_v71.py, test_toolchain.py, test_fuzz.py
 examples/        pyrust_vs_python.ipynb, benchmark_suite.py, workloads.py
 benchmarks/      raw results per release and platform, compare.py (regression report)
 docs/            documentation website (MkDocs), API.md, benchmark chart
@@ -306,8 +383,8 @@ docs/            documentation website (MkDocs), API.md, benchmark chart
 ## Roadmap
 
 1. **Faster calls:** a CPython extension entry point instead of `ctypes`, to bring the 2–3 µs per native call well under 1 µs.
-2. **Typed lists** (`list[float]` arguments) and local tuples as values.
-3. **More array types:** `float32`, `int32`, `bool`, and 3-D arrays.
+2. **Dicts and sets** of numbers inside compiled functions (counting, grouping, memoization).
+3. **More array types:** `float32`, `int32`, `uint8`, `bool`, 3-D arrays and slices like `a[i, :]`.
 4. **Faster dense array writes** (an optimised path for functions that fill whole arrays).
 5. **Benchmarks on ARM Linux**, and against Cython and PyPy.
 

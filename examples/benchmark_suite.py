@@ -11,9 +11,11 @@ import statistics
 import subprocess
 import tempfile
 import time
+import random
 import numpy as np
-from pyrust_engine import optimize
+from pyrust_engine import optimize, vectorize
 from .workloads import integer_work,float_work,array_energy,scalar_add,math_work,calls_work,bits_work,fib,smooth
+from .workloads import edit_distance,list_variance,monte_carlo_pi,price_score
 
 def measure(fn,args,repeat=7,batch=1):
     samples=[]
@@ -47,6 +49,8 @@ def run():
           ('bit_hash',bits_work,(300_000,),1,{}),
           ('recursion_fib',fib,(25,),1,{}),
           ('array_write',smooth,(array,np.empty_like(array)),1,{}),
+          ('edit_distance_strings',edit_distance,('kitten sitting on a mat '*12,'sitting kitten in a hat '*12),1,{}),
+          ('list_variance',list_variance,(array.tolist(),),1,{}),
           # Default: loop-free functions run as plain Python (no dispatch overhead).
           ('tiny_scalar',scalar_add,(12,19),1000,{}),
           # Forced native: shows the raw ctypes dispatch cost per call.
@@ -80,6 +84,21 @@ def run():
                 same(expected,vectorized(*args))
                 row['numpy_vectorized']=measure(vectorized,args)
             rows.append(row)
+        # random.random(): both runs start from the same seed and must give the same answer.
+        native=optimize(monte_carlo_pi,cache_dir=cache,fallback=False)
+        random.seed(5);expected=monte_carlo_pi(200_000);random.seed(5);same(expected,native(200_000))
+        a=measure(monte_carlo_pi,(200_000,));b=measure(native,(200_000,))
+        rows.append({'name':'random_monte_carlo','python':a,'pyrust':b,
+                     'python_over_pyrust':a['median_seconds']/b['median_seconds'],'report':native.report()})
+        # vectorize: a tiny function over 100k elements, versus a Python loop over the same arrays.
+        prices=np.abs(array)*10;qty=rng.integers(0,30,len(array))
+        def python_loop(p,q):
+            return np.array([price_score(x,y) for x,y in zip(p.tolist(),q.tolist())])
+        fast=vectorize(price_score,cache_dir=cache,fallback=False)
+        assert python_loop(prices,qty).tobytes()==fast(prices,qty).tobytes()
+        a=measure(python_loop,(prices,qty));b=measure(fast,(prices,qty))
+        rows.append({'name':'vectorize_tiny_function','python':a,'pyrust':b,
+                     'python_over_pyrust':a['median_seconds']/b['median_seconds'],'report':fast.report()})
         payload=json.dumps(rng.standard_normal(20_000).tolist())
         native=optimize(array_energy,cache_dir=cache,fallback=False);native.prepare()
         def pipeline(kernel):

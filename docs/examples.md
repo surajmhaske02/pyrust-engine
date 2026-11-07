@@ -113,3 +113,87 @@ def is_sorted(values) -> bool:
             return False
     return True
 ```
+
+## Text: count words and vowels (strings)
+
+```python
+@optimize
+def count_words(text: str) -> int:
+    words = 0
+    inside = False
+    for ch in text:
+        if ch.isspace():
+            inside = False
+        elif not inside:
+            inside = True
+            words += 1
+    return words
+
+count_words("PyRust makes   plain Python fast")    # 5
+```
+
+## Similarity between two strings (edit distance)
+
+```python
+@optimize
+def edit_distance(a: str, b: str) -> int:
+    prev = [0] * (len(b) + 1)
+    cur = [0] * (len(b) + 1)
+    for j in range(len(b) + 1):
+        prev[j] = j
+    for i in range(1, len(a) + 1):
+        cur[0] = i
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        for j in range(len(b) + 1):
+            prev[j] = cur[j]
+    return prev[len(b)]
+
+edit_distance("kitten", "sitting")    # 3
+```
+
+## Monte Carlo with Python's `random`
+
+```python
+import random
+
+@optimize
+def simulate_portfolio(days: int, start: float) -> float:
+    value = start
+    for _ in range(days):
+        value *= 1.0 + random.gauss(0.0005, 0.01)
+    return value
+
+random.seed(1)
+simulate_portfolio(252, 100.0)        # identical to plain Python after random.seed(1)
+```
+
+## Lists in, list out
+
+```python
+@optimize
+def moving_average(values: list[float], window: int) -> list[float]:
+    out = [0.0] * len(values)
+    total = 0.0
+    for i in range(len(values)):
+        total += values[i]
+        if i >= window:
+            total -= values[i - window]
+        out[i] = total / min(i + 1, window)
+    return out
+```
+
+## pandas: replace `df.apply` with `vectorize`
+
+```python
+from pyrust_engine import vectorize
+
+@vectorize
+def shipping_cost(weight: float, distance: float) -> float:
+    base = 4.99 if weight < 1.0 else 9.99
+    return base + 0.05 * distance * max(weight, 0.5)
+
+# Before: df.apply(lambda r: shipping_cost(r["weight"], r["km"]), axis=1)
+df["cost"] = shipping_cost(df["weight"], df["km"])     # one native loop, same values
+```
