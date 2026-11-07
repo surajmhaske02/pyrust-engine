@@ -94,7 +94,7 @@ def score(price: float, qty: int) -> float:    # write it for one row...
 df["score"] = score(df["price"], df["qty"])    # ...run it over whole pandas columns in one native loop
 ```
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. TESTCOUNT tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
+> **Status: experimental.** Not a general Python compiler and not production-hardened. 168 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
 
 ## Comparison at a glance
 
@@ -108,7 +108,11 @@ df["score"] = score(df["price"], df["qty"])    # ...run it over whole pandas col
 | `math.sqrt` / `sin` / `log` loop (300k) | 41.0 ms · 1× | **3.74 ms · 11×** |
 | Helper function called in a loop (300k) | 47.6 ms · 1× | **0.745 ms · 64×** |
 | Bit-mixing hash with `^ & << >> **` (300k) | 74.4 ms · 1× | **0.662 ms · 112×** |
-| Tiny `add(a, b)` per call | ≈1× | **≈1×** (runs as plain Python on purpose) |
+| Edit distance of two strings (288 chars each) · *0.7.1* | 11.2 ms · 1× | **0.758 ms · 15×** |
+| Monte Carlo with `random.random()` (200k) · *0.7.1* | 24.9 ms · 1× | **3.38 ms · 7.4×** |
+| Tiny function over 100k rows: `@vectorize` vs a Python loop · *0.7.1* | 13.4 ms · 1× | **0.653 ms · 20×** |
+| Variance of a Python list (100k floats, copy included) · *0.7.1* | 6.07 ms · 1× | **3.12 ms · 1.9×** |
+| Tiny `add(a, b)` per call | ≈1× | **≈1×** (runs as plain Python on purpose; use `@vectorize` for columns) |
 | JSON → array pipeline | 7.75 ms · 1× | **5.39 ms · 1.44×** |
 | Big integers / overflow / math errors | Exact | **Exact (replays in Python)** |
 | Unsupported code | Runs | **Runs in Python, with the line and a hint** |
@@ -330,7 +334,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 ## Limitations
 
 - **A subset of Python.** No dicts, sets, list methods (`append`), building strings, classes, methods, closures, generators, `try`/`with`, slicing or `print` in compiled code (they run as Python).
-- **Lists** are copied for each call (fast, but NumPy arrays avoid it for big data). Strings, `bytes` and pandas Series are read-only.
+- **Lists** are copied for each call. For simple work on big lists the copy dominates (variance of 100k floats: 1.9×); NumPy arrays avoid it. Strings, `bytes` and pandas Series are read-only.
 - **`random`:** only the shared generator's functions listed above; not inside `prange`, and don't draw random numbers from another thread during a compiled call.
 - **`min`/`max` over mixed int and float**, `round(x, ndigits)` and `math.hypot` aren't compiled (Python's results depend on details native code can't match exactly).
 - **NumPy scalars:** in Python, `a[i]` gives `np.float64`; PyRust returns a plain `float` with the same value.
@@ -343,7 +347,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Correctness evidence
 
-- **150 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
+- **168 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
 - **Edge cases** for every operation: NaN, ±0.0, ±inf, overflow, math domain errors, huge exponents and shifts, int/float comparisons around 2**53 and 2**63, writes that fail halfway, overlapping and read-only arrays, recursion depth, Ctrl-C on long calls, prebuilt libraries without Rust.
 - **Generated-program fuzzing:** random programs using the supported operators and `math` functions are compiled and compared with CPython on all three operating systems, including which exception is raised.
 - **Benchmark tracking:** every CI job compares its speedups with the last release and flags drops in the job summary.

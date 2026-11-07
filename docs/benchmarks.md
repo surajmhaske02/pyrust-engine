@@ -14,6 +14,17 @@ Speedup over plain Python, measured by CI on GitHub Actions runners with Python 
 | Bit-mixing hash | 112x | 72x | 104x |
 | Tiny `add(a, b)` | ≈1x (runs as Python) | ≈1x | ≈1x |
 
+New in 0.7.1 (Linux x86_64, Python 3.13, same CI setup):
+
+| Workload | Plain Python | PyRust 0.7.1 | Speedup |
+|---|---:|---:|---:|
+| Edit distance of two 288-character strings | 11.2 ms | 0.758 ms | 15x |
+| Monte Carlo π with `random.random()` (200k points, same numbers as Python) | 24.9 ms | 3.38 ms | 7.4x |
+| `@vectorize` tiny function over 100k rows, vs a Python loop | 13.4 ms | 0.653 ms | 20x |
+| Variance of a 100k-float Python list (copy into native memory included) | 6.07 ms | 3.12 ms | 1.9x |
+
+Lists are copied for each call, so simple work on big lists gains less; pass a NumPy array to skip the copy. `random` calls copy Python's generator state (about 5 KB) in and out once per call.
+
 ## Compared with Numba
 
 The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12. Speedup over plain Python in that run:
