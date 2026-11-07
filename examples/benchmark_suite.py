@@ -131,6 +131,10 @@ def v073_rows(cache, rng):
     add('tokenize_many_2000_docs_threads_vs_one_by_one',one_by_one,ai.tokenize_many,(texts,),
         note='both compiled; shows the gain from running on several threads',
         check=lambda:assert_same(one_by_one(texts),ai.tokenize_many(texts)))
+    one_by_one_chunks=lambda ts:[ai.chunk_text(t,500,50) for t in ts]
+    add('chunk_many_2000_docs_groups_vs_one_by_one',one_by_one_chunks,lambda ts:ai.chunk_many(ts,500,50),(texts,),
+        note='both compiled; 0.7.4 processes groups of documents per native call',
+        check=lambda:assert_same(one_by_one_chunks(texts),ai.chunk_many(texts,500,50)))
     emails=[f'user{i}@{"example" if i%3 else "site"}.com' if i%7 else f'user{i}' for i in range(200_000)]
     fast=vectorize(domain_length,cache_dir=cache,fallback=False)
     try:

@@ -21,7 +21,7 @@ import os
 import sys
 
 from .compiler import F32Array, F32Array2, F64Array, F64Array2, I64Array, I64Array2, prange
-from .runtime import optimize
+from .runtime import OptimizationError, optimize
 
 __all__ = [
     'BM25',
@@ -951,13 +951,131 @@ def batch(function, items, *, workers=None):
         return [result for part in done for result in part]
 
 
+def _tokenize_group(text: str, ends: I64Array) -> str:
+    # tokenize() for several documents joined together: tokens separated by ' ', documents
+    # by '\n' (tokens are letters and digits, so neither can occur inside one).
+    out = ''
+    start = 0
+    for d in range(len(ends)):
+        if d > 0:
+            out += '\n'
+        first = True
+        inside = False
+        for i in range(start, ends[d]):
+            ch = text[i]
+            if ch.isalnum():
+                if not inside:
+                    if not first:
+                        out += ' '
+                    first = False
+                    inside = True
+                out += ch.lower()
+            else:
+                inside = False
+        start = ends[d]
+    return out
+
+
+def _chunk_group(text: str, ends: I64Array, size: int, overlap: int) -> list[int]:
+    # chunk_text() for several documents joined together, as (start, stop) positions in the
+    # joined text; each document starts with its number of chunks.
+    spans = []  # type: ignore[var-annotated]  # list[int], built by appending
+    lo = 0
+    for d in range(len(ends)):
+        n = ends[d]
+        count_at = len(spans)
+        spans.append(0)
+        start = lo
+        while start < n:
+            end = min(start + size, n)
+            if end < n:
+                space = text.rfind(' ', start, end)
+                if space > start:
+                    end = space
+            a = start
+            b = end
+            while a < b and text[a].isspace():
+                a += 1
+            while b > a and text[b - 1].isspace():
+                b -= 1
+            if b > a:
+                spans.append(a)
+                spans.append(b)
+                spans[count_at] += 1
+            if end >= n:
+                break
+            start = max(end - overlap, start + 1)
+        lo = n
+    return spans
+
+
+_tokenize_grouped = optimize(_tokenize_group, fallback=False, warn_on_fallback=False)
+_chunk_grouped = optimize(_chunk_group, fallback=False, warn_on_fallback=False)
+_GROUP_CHARS = 1 << 16  # about 64k characters per native call
+
+
+def _groups(texts, workers):
+    """Consecutive slices of texts with about _GROUP_CHARS characters each (at least one per worker)."""
+    total = sum(map(len, texts))
+    target = max(1, min(_GROUP_CHARS, total // max(1, workers)))
+    groups, start, size = [], 0, 0
+    for i, text in enumerate(texts):
+        size += len(text)
+        if size >= target:
+            groups.append((start, i + 1))
+            start, size = i + 1, 0
+    if start < len(texts):
+        groups.append((start, len(texts)))
+    return groups
+
+
+def _ends(np, texts):
+    return np.cumsum(np.fromiter(map(len, texts), dtype=np.int64, count=len(texts)))
+
+
+def _tokenize_slice(texts):
+    np = _numpy()
+    try:
+        joined = _tokenize_grouped(''.join(texts), _ends(np, texts))
+    except OptimizationError:  # no Rust, or text that needs Python (non-ASCII letters)
+        return [tokenize(t) for t in texts]
+    return [line.split(' ') if line else [] for line in joined.split('\n')]
+
+
+def _chunk_slice(texts, size, overlap):
+    np = _numpy()
+    joined = ''.join(texts)
+    try:
+        spans = _chunk_grouped(joined, _ends(np, texts), size, overlap)
+    except OptimizationError:
+        return [_chunk_compiled(t, size, overlap) for t in texts]
+    out, p = [], 0
+    for _ in texts:
+        count = spans[p]
+        out.append([joined[spans[q] : spans[q + 1]] for q in range(p + 1, p + 1 + 2 * count, 2)])
+        p += 1 + 2 * count
+    return out
+
+
+def _run_groups(texts, workers, run):
+    texts = list(texts)
+    workers = workers or os.cpu_count() or 1
+    groups = _groups(texts, workers)
+    if workers <= 1 or len(groups) < 2:
+        return [x for a, b in groups for x in run(texts[a:b])]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        done = pool.map(lambda g: run(texts[g[0] : g[1]]), groups)
+        return [x for part in done for x in part]
+
+
 def tokenize_many(texts, *, workers=None):
-    """tokenize() for every text, on several threads."""
-    return batch(tokenize, texts, workers=workers)
+    """tokenize() for every text. Documents are processed in groups (one native call per
+    about 64k characters) on several threads; the result is the same as one by one."""
+    return _run_groups(texts, workers, _tokenize_slice)
 
 
 def chunk_many(texts, size: int = 1000, overlap: int = 200, *, workers=None):
-    """chunk_text() for every text, on several threads: one list of chunks per text."""
+    """chunk_text() for every text, in groups on several threads: one list of chunks per text."""
     if size <= 0 or overlap < 0 or overlap >= size:
         raise ValueError('need size > 0 and 0 <= overlap < size')
-    return batch(lambda text: _chunk_compiled(text, size, overlap), texts, workers=workers)
+    return _run_groups(texts, workers, lambda part: _chunk_slice(part, size, overlap))

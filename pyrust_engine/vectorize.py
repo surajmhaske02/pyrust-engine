@@ -59,6 +59,15 @@ class _Column:
         return len(self.items)
 
 
+def _text(np, items, index=None, name=None):
+    """A column of str: the compiled loop gets all of it as one string plus row offsets, and
+    each row is a view into that string (no per-row conversion)."""
+    offsets = np.zeros(len(items) + 1, dtype=np.int64)
+    if items:
+        np.cumsum(np.fromiter(map(len, items), dtype=np.int64, count=len(items)), out=offsets[1:])
+    return _Column((''.join(items), offsets), 'strv', items, index, name)
+
+
 def _from_numpy(np, value, index=None, name=None):
     if value.ndim != 1:
         return _Column(None, None, value, index, name)
@@ -82,7 +91,7 @@ def _from_list(np, value, index=None, name=None):
     if kind == 'ilist':
         return _Column(np.array(value, dtype=np.int64), 'i64', value, index, name)
     if kind == 'slist':
-        return _Column(value, 'strv', value, index, name)
+        return _text(np, value, index, name)
     if value and set(map(type, value)) == {bool}:
         return _Column(np.array(value, dtype=np.int64), 'bool', value, index, name)
     return _Column(None, None, value, index, name)
@@ -122,7 +131,7 @@ class Vectorized:
             if (getattr(dtype, 'kind', '') == 'O' or isinstance(dtype, pd.StringDtype)) and not value.hasnans:
                 items = value.tolist()
                 if set(map(type, items)) <= {str}:
-                    return _Column(items, 'strv', items, value.index)
+                    return _text(np, items, value.index)
             return _Column(None, None, value.to_numpy(), value.index)
         pl = sys.modules.get('polars')
         if pl is not None and isinstance(value, pl.Series):
@@ -132,8 +141,7 @@ class Vectorized:
                 return _Column(None, None, value.to_list(), name=name)
             dtype = value.dtype
             if dtype == pl.String:
-                items = value.to_list()
-                return _Column(items, 'strv', items, name=name)
+                return _text(np, value.to_list(), name=name)
             if dtype == pl.Boolean:
                 items = value.to_list()
                 return _Column(np.array(items, dtype=np.int64), 'bool', items, name=name)
@@ -160,7 +168,8 @@ class Vectorized:
 
     # ----------------------------------------------------------------- kernels
     def kernel(self, layout, result_kind):
-        """Compiled loop. layout: per argument None (plain value), 'array' or 'bool' (0/1 ints read as bool)."""
+        """Compiled loop. layout: per argument None (plain value), 'array', 'bool' (0/1 ints read
+        as bool) or 'text' (one joined string x and its row offsets x_o)."""
         key = (layout, result_kind == 'strv')
         with self.lock:
             existing = self.kernels.get(key)
@@ -168,10 +177,19 @@ class Vectorized:
                 return existing
             from .runtime import optimize
 
-            params = [f'x{k}' for k in range(self.arity)]
+            params = []
             items = []
             for k, how in enumerate(layout):
-                items.append(f'x{k}' if how is None else f'bool(x{k}[i])' if how == 'bool' else f'x{k}[i]')
+                params.append(f'x{k}')
+                if how is None:
+                    items.append(f'x{k}')
+                elif how == 'bool':
+                    items.append(f'bool(x{k}[i])')
+                elif how == 'text':
+                    params.append(f'x{k}_o')
+                    items.append(f'x{k}[x{k}_o[i]:x{k}_o[i + 1]]')
+                else:
+                    items.append(f'x{k}[i]')
             call = ', '.join(items)
             name = '_pyrust_vectorized_' + self.python.__name__
             if result_kind == 'strv':
@@ -223,9 +241,19 @@ class Vectorized:
         if result_kind is None:
             out = self.python_loop(args, columns, n)
         else:
-            layout = tuple(None if c is None else 'bool' if c.kind == 'bool' else 'array' for c in columns)
+            layout = tuple(
+                None if c is None else 'bool' if c.kind == 'bool' else 'text' if c.kind == 'strv' else 'array'
+                for c in columns
+            )
             kernel = self.kernel(layout, result_kind)
-            values = [a if c is None else c.data for a, c in zip(args, columns)]
+            values = []
+            for a, c in zip(args, columns):
+                if c is None:
+                    values.append(a)
+                elif c.kind == 'strv':
+                    values.extend(c.data)  # joined text, offsets
+                else:
+                    values.append(c.data)
             if result_kind == 'strv':
                 out = np.array(kernel(*values, n))
             else:

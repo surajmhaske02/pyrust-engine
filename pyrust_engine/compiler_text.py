@@ -1,4 +1,4 @@
-"""Code generation for strings, growable lists, dicts and sets (0.7.3).
+"""Code generation for strings, growable lists, dicts and sets (0.7.4).
 
 Mixed into Compiler. Kinds: 'strv' (a string value), 'char', 'str' (a str argument),
 'flist' / 'ilist' (lists of numbers), 'slist' (list of str), 'dict(K,V)', 'set(K)'.
@@ -154,7 +154,7 @@ class TextMixin:
         if kind == 'char':
             return f'sv(&[{value}])'
         if kind == 'str':
-            return f'sv(sl({value}))'
+            return f's_whole(sl({value}))'  # a str argument: a view, no copy
         self.fail(node, 'expected a string')
 
     def string_literal(self, text):
@@ -337,6 +337,8 @@ class TextMixin:
             lo, hi = self.bound(sl.lower), self.bound(sl.upper)
             if kind in ('str', 'strv', 'char'):
                 text = self.as_text(value, kind, base) if not isinstance(base, ast.Name) else self.text(base)[0]
+                if kind == 'str' and isinstance(base, ast.Name):
+                    return f's_view({text},{lo},{hi})', 'strv'  # slice of a str argument: no copy
                 return f's_slice({text},{lo},{hi})', 'strv'
             if kind in LIST_KINDS:
                 return f'a_slice({ref},{lo},{hi},{zero(ELEMENT[kind])}{ELEMENT[kind]})?', kind

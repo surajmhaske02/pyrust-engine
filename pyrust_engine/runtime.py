@@ -6,8 +6,10 @@ import ctypes
 import functools
 import hashlib
 import inspect
+import os
 import platform
 import random as _random
+import sys
 import textwrap
 import threading
 import time
@@ -102,6 +104,90 @@ _FAST_RESULT = {
     'bool': _fast_result(ctypes.c_bool),
     'none': _fast_result(ctypes.c_uint8),
 }
+_CAPI_NAMES = (
+    'PyTuple_Size',
+    'PyTuple_GetItem',
+    'PyObject_Type',
+    'Py_DecRef',
+    'Py_IncRef',
+    'PyLong_AsLongLongAndOverflow',
+    'PyFloat_AsDouble',
+    'PyLong_FromLongLong',
+    'PyFloat_FromDouble',
+    'PyLong_AsVoidPtr',
+    'PyEval_SaveThread',
+    'PyEval_RestoreThread',
+    'PyObject_Call',
+    'PyTuple_New',
+    'PyTuple_SetItem',
+    'PyFunction_GetCode',
+    'PyFunction_GetDefaults',
+    'PyFunction_GetKwDefaults',
+    'PyDict_GetItem',
+)
+_CAPI: Any = None
+
+
+def _capi():
+    """(table of C-API pointers, PyCFunction_NewEx) for direct entry points, or None.
+
+    Disabled on other Python implementations and with PYRUST_DIRECT_CALLS=0.
+    """
+    global _CAPI
+    if _CAPI is None:
+        _CAPI = False
+        if platform.python_implementation() == 'CPython' and os.environ.get('PYRUST_DIRECT_CALLS', '1') != '0':
+            try:
+                api = ctypes.pythonapi
+                pointers = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_NAMES]
+                objects = [id(int), id(float), id(bool), id(True), id(False), id(None)]
+                table = (ctypes.c_void_p * (len(pointers) + len(objects)))(*pointers, *objects)
+                new = api.PyCFunction_NewEx
+                new.argtypes = [ctypes.c_void_p, ctypes.py_object, ctypes.py_object]
+                new.restype = ctypes.py_object
+                _CAPI = (table, new)
+            except (AttributeError, OSError, ValueError):
+                _CAPI = False
+    return _CAPI or None
+
+
+class _PyCall(ctypes.Structure):
+    """Per-function state read by the direct entry point (layout of PyCall in generated Rust)."""
+
+    _fields_ = [
+        ('count', ctypes.c_uint64),
+        ('budget', ctypes.c_uint64),
+        ('fallback', ctypes.c_void_p),
+        ('function', ctypes.c_void_p),
+        ('code', ctypes.c_void_p),
+        ('defaults', ctypes.c_void_p),
+        ('kwdefaults', ctypes.c_void_p),
+        ('nguards', ctypes.c_size_t),
+        ('guards', ctypes.c_void_p),
+        ('ncode', ctypes.c_size_t),
+        ('code_guards', ctypes.c_void_p),
+    ]
+
+
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _warn_at_caller():
+    """warnings.warn() arguments that point at the user's call, however many PyRust frames
+    (and direct-call fallbacks) are in between."""
+    if sys.version_info >= (3, 12):
+        return {'skip_file_prefixes': (_PACKAGE_DIR,)}
+    level, frame = 1, sys._getframe(1)  # stacklevel 1 = the function that calls warnings.warn
+    while frame is not None and frame.f_code.co_filename.startswith(_PACKAGE_DIR):
+        frame = frame.f_back
+        level += 1
+    return {'stacklevel': level}
+
+
+def _address(obj):
+    return None if obj is None else id(obj)
+
+
 FAST_BUDGET = 50_000_000  # iterations run inline; longer calls move to an interruptible thread
 UNLIMITED = 2**64 - 1
 MAX_SPECIALIZATIONS = 16
@@ -308,6 +394,7 @@ class _Native:
         'fast',
         'checks',
         'void',
+        'py_def',
     )
 
     def __init__(self, lib, description):
@@ -358,7 +445,11 @@ class _Native:
         self.checks = bool(self.guards or self.code_guards)
         self.void = rt == 'none'
         self.fast = None
+        self.py_def = None
         if description.fast_eligible():
+            self.py_def = lib.pyrust_py_def
+            self.py_def.argtypes = [ctypes.c_void_p]
+            self.py_def.restype = ctypes.c_void_p
             # Scalars in, one scalar out: value and status come back together in a struct.
             fast = lib.pyrust_fast
             fast.argtypes = [*argtypes[: len(self.kinds)], ctypes.c_uint64]  # + iteration budget
@@ -598,6 +689,10 @@ class _Optimized:
         self.specs = {}  # kinds tuple -> _Native or _Failure
         self.sources = {}  # kinds tuple -> Rust source
         self.worker = None
+        self.direct = [None]  # the installed direct entry point (a C function object) or None
+        self.direct_state = None  # (_PyCall, objects it points to)
+        self.direct_base = 0  # calls counted by entry points removed by reset()
+        self.direct_at_reason = 0
         try:
             self.default_kinds = tuple(default_kinds(fn).values())
         except Unsupported:
@@ -609,9 +704,19 @@ class _Optimized:
         with self.metrics_lock:
             self.state.update(values)
 
+    def direct_calls(self):
+        state = self.direct_state
+        return self.direct_base + (state[0].count if state is not None else 0)
+
     def report(self):
+        direct = self.direct_calls()
         with self.metrics_lock:
             data = dict(self.state)
+            data['calls'] += direct
+            data['native_calls'] += direct
+            if direct > self.direct_at_reason:  # successful native calls since the last fallback
+                data['reason'] = None
+                data['backend'] = 'rust'
             data['fallback_reasons'] = dict(self.reasons)
             data['specializations'] = [list(k) for k, v in self.specs.items() if isinstance(v, _Native)]
         calls = data['calls']
@@ -622,7 +727,7 @@ class _Optimized:
         data['fallback_average_seconds'] = (
             data['fallback_seconds'] / data['fallback_calls'] if data['fallback_calls'] else None
         )
-        data['dispatch'] = 'wrapper'
+        data['dispatch'] = 'direct' if self.direct[0] is not None else 'wrapper'
         data['call_counting'] = True
         return data
 
@@ -631,6 +736,7 @@ class _Optimized:
         fn = self.fn
         with self.metrics_lock:
             self.state['reason'] = reason
+            self.direct_at_reason = self.direct_calls()
             if toolchain_problem:
                 first = reason not in _TOOLCHAIN_WARNED
                 _TOOLCHAIN_WARNED.add(reason)
@@ -645,10 +751,12 @@ class _Optimized:
                     f'{fn.__qualname__} ran as plain Python: {reason}\n'
                     '(Shown once: this applies to every @optimize function until Rust works.)',
                     RustToolchainWarning,
-                    stacklevel=4,
+                    **_warn_at_caller(),
                 )
             else:
-                warnings.warn(f'{fn.__qualname__} ran as plain Python: {reason}', PyRustFallbackWarning, stacklevel=4)
+                warnings.warn(
+                    f'{fn.__qualname__} ran as plain Python: {reason}', PyRustFallbackWarning, **_warn_at_caller()
+                )
         start = time.perf_counter()
         try:
             return fn(*args, **kwargs)
@@ -706,6 +814,7 @@ class _Optimized:
                             native = _Native(ctypes.CDLL(str(path)), description)
                             rebuilt, hit = True, False
                 self.specs[kinds] = native
+                self.install_direct(native)
                 self.update(
                     backend='rust',
                     reason=None,
@@ -747,11 +856,59 @@ class _Optimized:
             raise OptimizationError(result.reason)
         return self.report()
 
+    def install_direct(self, native):
+        """Let CPython call the native code directly for this specialization (scalars only).
+
+        The entry point checks argument types, the function's code and defaults and every
+        global it depends on; anything else goes to the Python path, so results are the same.
+        """
+        if self.timing or self.direct[0] is not None or native.py_def is None:
+            return
+        capi = _capi()
+        if capi is None:
+            return
+        table, new = capi
+        fn = self.fn
+        objects = [fn, fn.__code__, fn.__defaults__, fn.__kwdefaults__, self.direct_fallback, table]
+        guards = []
+        for namespace, builtin_ns, name, expected in native.guards:
+            guards += [id(namespace), id(builtin_ns), id(name), id(expected)]
+            objects += [namespace, builtin_ns, name, expected]
+        code_guards = []
+        for callee, code, defaults in native.code_guards:
+            code_guards += [id(callee), id(code), _address(defaults) or 0]
+            objects += [callee, code, defaults]
+        guard_array = (ctypes.c_void_p * max(1, len(guards)))(*guards)
+        code_array = (ctypes.c_void_p * max(1, len(code_guards)))(*code_guards)
+        state = _PyCall(
+            count=0,
+            budget=self.max_iterations or FAST_BUDGET,
+            fallback=id(self.direct_fallback),
+            function=id(fn),
+            code=id(fn.__code__),
+            defaults=_address(fn.__defaults__),
+            kwdefaults=_address(fn.__kwdefaults__),
+            nguards=len(guards) // 4,
+            guards=ctypes.addressof(guard_array),
+            ncode=len(code_guards) // 3,
+            code_guards=ctypes.addressof(code_array),
+        )
+        try:
+            entry = new(native.py_def(ctypes.addressof(table)), ctypes.addressof(state), None)
+        except Exception:  # pragma: no cover - keeps the ctypes path
+            return
+        self.direct_state = (state, guard_array, code_array, objects, native)
+        self.direct[0] = entry
+
     def reset(self):
         active = self.worker
         if active is not None and active.is_alive():
             active.join()
         with self.compile_lock:
+            self.direct[0] = None
+            if self.direct_state is not None:
+                self.direct_base += self.direct_state[0].count
+                self.direct_state = None
             self.specs.clear()
             self.sources.clear()
             self.worker = None
@@ -969,8 +1126,7 @@ class _Optimized:
 
         code0, defaults0, kwdefaults0 = original
 
-        @functools.wraps(fn)
-        def wrapped(*args, **kwargs):
+        def python_entry(*args, **kwargs):
             # Fast path: exact positional call of a scalar specialization (no out-parameter
             # objects, one ctypes call returning value and status together).
             if (
@@ -1004,6 +1160,22 @@ class _Optimized:
                     return None if native.void else result.value
                 return general(args, kwargs, known_kinds=kinds)
             return general(args, kwargs)
+
+        def direct_fallback(status, args):
+            # Called by the direct entry point: -1 = arguments or globals it doesn't handle.
+            if status == -1:
+                return python_entry(*args)
+            return general(args, {}, status)
+
+        self.direct_fallback = direct_fallback
+        direct = self.direct
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            entry = direct[0]
+            if entry is not None and not kwargs:
+                return entry(*args)
+            return python_entry(*args, **kwargs)
 
         def rust_source(kinds=None):
             if kinds is None:

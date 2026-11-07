@@ -1,4 +1,4 @@
-"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.3).
+"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.4).
 
 Every helper reproduces CPython's behaviour for the cases it accepts and returns an
 error status for anything else, so the call replays in Python:
@@ -36,12 +36,19 @@ impl std::hash::Hasher for FastHasher {
 pub type HSet<K>=HashSet<K,FastState>;
 // Strings are Unicode code points. Up to 7 are stored inline (no allocation: most words);
 // longer ones are shared and copied on write, so s += t is amortized O(1) like CPython.
+// View points into a str argument's buffer, which lives for the whole call (slices of an
+// argument need no copy); it becomes an owned string when written to.
 #[derive(Clone)]
-pub enum S { Small(u8,[u32;7]), Big(std::sync::Arc<Vec<u32>>) }
+pub enum S { Small(u8,[u32;7]), Big(std::sync::Arc<Vec<u32>>), View(*const u32,usize) }
+unsafe impl Send for S {}
+unsafe impl Sync for S {}
 impl Default for S { fn default()->S{S::Small(0,[0;7])} }
 impl std::ops::Deref for S {
     type Target=[u32];
-    #[inline] fn deref(&self)->&[u32]{match self {S::Small(n,d)=>&d[..*n as usize], S::Big(a)=>&a[..]}}
+    #[inline] fn deref(&self)->&[u32]{match self {
+        S::Small(n,d)=>&d[..*n as usize], S::Big(a)=>&a[..],
+        S::View(p,n)=>if *n==0 {&[]} else {unsafe{std::slice::from_raw_parts(*p,*n)}},
+    }}
 }
 impl PartialEq for S { #[inline] fn eq(&self,o:&S)->bool{**self==**o} }
 impl Eq for S {}
@@ -62,6 +69,7 @@ fn sl(a:&Arr<u32>)->&[u32]{if a.len==0 {&[]} else {unsafe{std::slice::from_raw_p
 fn av<T:Copy>(a:&Arr<T>)->&[T]{if a.len==0 {&[]} else {unsafe{std::slice::from_raw_parts(a.ptr,a.len)}}}
 fn avm<T:Copy>(a:&mut Arr<T>)->&mut [T]{if a.len==0 {&mut []} else {unsafe{std::slice::from_raw_parts_mut(a.ptr,a.len)}}}
 fn s_push(s:&mut S,t:&[u32]){
+    if let S::View(..)=s {let mut v=Vec::with_capacity((s.len()+t.len()).max(16)); v.extend_from_slice(s); v.extend_from_slice(t); *s=sown(v); return}
     if let S::Small(n,d)=s {
         let k=*n as usize;
         if k+t.len()<=7 {d[k..k+t.len()].copy_from_slice(t); *n=(k+t.len()) as u8; return}
@@ -71,6 +79,12 @@ fn s_push(s:&mut S,t:&[u32]){
     if let S::Big(a)=s {std::sync::Arc::make_mut(a).extend_from_slice(t);}
 }
 fn s_cat(a:&[u32],b:&[u32])->S{let mut v=Vec::with_capacity(a.len()+b.len()); v.extend_from_slice(a); v.extend_from_slice(b); sown(v)}
+// A slice of a str argument: inline when short, otherwise a view into the argument's buffer.
+fn s_view(v:&[u32],a:Option<i64>,b:Option<i64>)->S{
+    let (x,y)=bounds(v.len(),a,b);
+    if y-x<=7 {sv(&v[x..y])} else {S::View(unsafe{v.as_ptr().add(x)},y-x)}
+}
+fn s_whole(v:&[u32])->S{if v.len()<=7 {sv(v)} else {S::View(v.as_ptr(),v.len())}}
 fn s_at(s:&[u32],i:i64)->Result<u32,i32>{let j=index(s.len(),i)?; Ok(s[j])}
 fn v_at<T:Clone>(v:&[T],i:i64)->Result<T,i32>{let j=index(v.len(),i)?; Ok(v[j].clone())}
 fn v_at_nn<T:Clone>(v:&[T],i:i64)->Result<T,i32>{if i<0 {return Err(3)} v_at(v,i)}
