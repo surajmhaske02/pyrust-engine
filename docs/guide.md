@@ -196,7 +196,7 @@ def count_valid(emails) -> int:         # df["email"]
 
 A polars Series without nulls is accepted where a list is: floats (`Float64`, `Float32`) and ints (`Int64` and smaller, `UInt32` and smaller) are read without copying where possible, and `String` columns work like a list of str. Like a list, `s[-1]` is the last value. Every value is exactly what Python sees when it reads the Series (Python `float`, `int`, `str`).
 
-For per-row functions over number columns, use `@vectorize` (below) instead of `map_elements` (the numbers are read without copying). For text columns, polars' own `map_elements` is currently about as fast or faster:
+For per-row functions, use `@vectorize` (below) instead of `map_elements`: about 20× faster on number columns (read without copying) and 1.5–2× on text columns:
 
 ```python
 import polars as pl
@@ -254,7 +254,7 @@ def clean(text: str) -> str:       # str results too
     return text.strip().lower()
 ```
 
-A tiny function called once per value from Python is dominated by call overhead, even natively. `vectorize` generates the loop, compiles it together with your function, and runs everything in one native call. It replaces `df.apply(lambda row: ...)`, `Series.map` and list comprehensions over columns: about 20× faster on number and bool columns. On text columns the gain is small (0.9–2× against pandas `map`), because each Python string has to be converted. Every element gets exactly the value your function returns in Python. Array arguments must have the same length. `@vectorize(parallel=True)` splits the elements across CPU cores.
+A tiny function called once per value from Python is dominated by call overhead, even natively. `vectorize` generates the loop, compiles it together with your function, and runs everything in one native call. It replaces `df.apply(lambda row: ...)`, `Series.map` and list comprehensions over columns: about 20× faster on number and bool columns and 3–4× on text columns (a text column is passed as one string, and each row is a view into it). Every element gets exactly the value your function returns in Python. Array arguments must have the same length. `@vectorize(parallel=True)` splits the elements across CPU cores.
 
 | Column type | Compiled | The function receives |
 |---|---|---|
@@ -287,7 +287,7 @@ Several threads can run compiled functions at the same time on different cores. 
 
 **Free-threaded Python (3.14t).** On the free-threaded build there is no GIL at all, so the Python code between compiled calls runs in parallel too. PyRust loads no C extension, so it never turns the GIL back on; CI runs the full test suite on 3.14t and checks that the GIL stays off. `python -m pyrust_engine doctor` says which build you are on. `pyrust_engine.ai.batch(fn, items)` runs any function over many items on a thread pool.
 
-**Call cost.** Since 0.7.3 a call with only `int`/`float`/`bool` arguments and a number, bool or `None` result uses a shorter native entry point that returns the value and the status together, about 40% less per call than 0.7.2 (2.8 µs instead of 4.5 µs on the Linux CI machine). Functions without a loop still run as plain Python by default, because even a short native call costs more than a few additions.
+**Call cost.** Since 0.7.4, a function with only `int`/`float`/`bool` arguments and a number, bool or `None` result is called by CPython directly: a C-level entry point checks the argument types, the function's code and every global it uses, runs the native code without the GIL, and builds the result, in about 0.2 µs. Anything else (keyword arguments, other types, big ints, a changed global) takes the normal path, so results never change. `fn.report()['dispatch']` is `'direct'` when this is in use; `PYRUST_DIRECT_CALLS=0` turns it off. Calls with arrays, strings or containers cost 1–3 µs. Functions without a loop still run as plain Python by default (a Python call costs about 0.05 µs).
 
 ## Parallel loops
 

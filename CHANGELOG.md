@@ -1,3 +1,38 @@
+# 0.7.4
+
+Faster calls and faster text: the two weak spots measured in 0.7.3.
+
+**Direct calls from CPython**
+- Functions with `int`/`float`/`bool` arguments and a number, bool or `None` result get a
+  C-level entry point that CPython calls directly, instead of going through `ctypes`.
+  It reads the arguments, checks their exact types, the 64-bit range, the function's
+  code and defaults and every global the compiled code depends on, runs the native code
+  without the GIL, and builds the result object. Anything else (other types, keyword
+  arguments, big ints, a changed global, a native error) goes to the Python path, so
+  results are unchanged.
+- The C-API is reached through function pointers from `ctypes.pythonapi`, so the
+  generated library links against nothing: same on Linux, macOS, Windows and
+  free-threaded Python. `PYRUST_DIRECT_CALLS=0` turns it off; `report()['dispatch']`
+  says `'direct'` when it is in use.
+- Per call (CI, Python 3.13): 0.18 µs on Linux (was 2.8 µs in 0.7.3), 0.16 µs on macOS
+  (was 1.3 µs), 0.19 µs on Windows (was 1.8 µs). Plain Python calls cost about 0.05 µs.
+
+**Text**
+- Slices of a `str` argument (`text[a:b]`) are views into the argument instead of copies.
+- `@vectorize` passes a text column as one string plus row offsets; each row is a view.
+  A 200k-row text column: 3.4–4.5x faster than pandas `Series.map` (was 0.9–2.1x) and
+  1.5–2.2x faster than polars `map_elements` (was 0.4–1.0x).
+- `tokenize_many` and `chunk_many` process groups of documents (about 64k characters) per
+  native call; a group with text that needs Python (non-ASCII letters) falls back to one
+  call per document. Measured:
+  `tokenize_many` 1.7–1.9x faster than tokenizing one by one (was 1.1–1.2x), `chunk_many`
+  2.2–3.5x.
+
+**Fixes**
+- Fallback warnings point at the caller's line on every Python version.
+
+242 tests pass on Linux, macOS and Windows (Python 3.10–3.15) and free-threaded 3.14t.
+
 # 0.7.3
 
 Five things AI and data engineers asked for: faster calls, pandas 3 and polars columns,

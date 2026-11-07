@@ -1,4 +1,4 @@
-# PyRust Engine API reference (0.7.3)
+# PyRust Engine API reference (0.7.4)
 
 Everything public is importable from `pyrust_engine`:
 
@@ -75,7 +75,7 @@ Applies a function written for single values to every position of its array argu
 |---|---|
 | `backend` | `'rust'`, `'python'`, `'pending'` (not compiled yet) or `'compiling'`. |
 | `toolchain_problem` | `True` when the last compile failed because Rust or the linker is missing or broken. |
-| `dispatch` | `'wrapper'` (normal) or `'python-direct'` (loop-free function running as plain Python with no wrapper). |
+| `dispatch` | `'direct'` (CPython calls the native code directly; numbers in and out), `'wrapper'` (normal) or `'python-direct'` (loop-free function running as plain Python with no wrapper). |
 | `call_counting` | `False` for `python-direct` functions, whose calls are not counted. |
 | `reason` | Why the latest call ran as Python, or `None`. |
 | `compile_error` | Why compilation failed, or `None`. |
@@ -228,6 +228,7 @@ python -m pyrust_engine cache [--days 30] [--delete] [--directory DIR]
 | `PYRUST_CACHE_DIR` | Cache folder (default `~/.cache/pyrust_engine`). |
 | `PYRUST_CACHE_MAX_AGE_DAYS` | Remove cache entries unused this long (default 30, `0` = never). |
 | `PYRUST_PREBUILT` | Extra folders with prebuilt libraries (`os.pathsep`-separated). |
+| `PYRUST_DIRECT_CALLS` | `0` turns off direct calls from CPython (calls then go through `ctypes`). |
 
 ## `prune_cache`
 

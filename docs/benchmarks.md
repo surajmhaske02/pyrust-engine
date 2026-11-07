@@ -56,8 +56,20 @@ What these numbers mean:
 
 - **BM25Okapi** returns exactly rank_bm25's scores. Queries touch only the documents that contain the words, so they are much faster; building the index costs about the same.
 - **Binary codes** are 32x smaller than float32 and faster to search than with NumPy. **int8** search is about as fast as NumPy, but NumPy needs an int32 copy of the whole matrix on every query (4x the memory of the int8 matrix), and `int8 @ int8` in NumPy overflows.
-- **Text columns:** converting 200k Python strings to native strings costs about as much as calling a small Python function on each, so the gain is small, and polars' own `map_elements` is faster for text. Number and bool columns are read without copying and gain 20x or more (see `@vectorize` above). Use `@vectorize` for text when the function does real work per row (loops, several string operations).
-- **Threads with the GIL:** `tokenize_many` gains little, because converting strings in and out takes turns on the GIL. On free-threaded Python (3.14t) nothing takes turns.
+- **Text columns** (0.7.3 numbers): converting each string separately cost about as much as the work. 0.7.4 passes the column as one string, see below.
+- **Threads with the GIL:** converting strings in and out takes turns on the GIL; 0.7.4 groups documents per native call to reduce that. On free-threaded Python (3.14t) nothing takes turns.
+
+New in 0.7.4 (CI, Python 3.13):
+
+| Workload | Baseline | Linux | macOS | Windows |
+|---|---|---:|---:|---:|
+| Native call of a tiny function, per call | 0.7.3: 2.8 / 1.3 / 1.8 µs | **0.18 µs** | **0.16 µs** | **0.19 µs** |
+| `@vectorize` over a 200k-row text column | pandas `Series.map` | **4.5x** | 3.9x | 3.4x |
+| `@vectorize` over a 200k-row text column | polars `map_elements` | **1.7x** | 2.2x | 1.5x |
+| `tokenize_many`, 2,000 documents | `tokenize` one by one (also compiled) | **1.65x** | 1.9x | 1.8x |
+| `chunk_many`, 2,000 documents | `chunk_text` one by one (also compiled) | **2.6x** | 3.5x | 2.2x |
+
+Calls with `int`/`float`/`bool` arguments now go from CPython straight into the native code (no `ctypes`), which makes a native call about 10x cheaper. Text columns are passed as one string with row offsets, and each row is a view into it, so there is no per-row conversion. Batches process groups of documents per native call.
 
 ## Compared with Numba
 
