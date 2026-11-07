@@ -139,7 +139,8 @@ impl<T:Copy> Arr<T>{
     fn write(&mut self,j:usize,v:T){
         if self.track && self.orig.is_none() {
             self.log.push((j,unsafe{*self.ptr.add(j)}));
-            if self.log.len()>self.len {self.snapshot();}
+            // Few writes: keep the small undo log. Many writes: one copy is cheaper.
+            if self.log.len()>64 && self.log.len()*16>self.len {self.snapshot();}
         }
         unsafe{*self.ptr.add(j)=v;}
     }
