@@ -1,4 +1,4 @@
-# PyRust Engine API reference (0.7.2)
+# PyRust Engine API reference (0.7.3)
 
 Everything public is importable from `pyrust_engine`:
 
@@ -104,7 +104,9 @@ A function is compiled once per combination of argument types it is actually cal
 | `list` of floats / of 64-bit ints | copied in; written lists copied back into the same object | `list[float]` / `list[int]` |
 | `str` | read-only characters (Unicode code points) | `str` |
 | `bytes` | read-only, elements are ints | `bytes` |
-| pandas `Series`, `float64` / `int64`, index `0..n-1` | read-only, no copy | `pd.Series` |
+| pandas `Series`, `float64` / `int64` / `float32`, index `0..n-1` | read-only, no copy; `s[-1]` raises `KeyError` like pandas | `pd.Series` |
+| pandas `Series` of str (pandas 3 `str` or `object`), no missing values, index `0..n-1` | read-only list of str; only `s[i]`, `len`, loops, `sorted/list/set/min/max/join` | |
+| polars `Series` without nulls: floats, ints up to `Int64`/`UInt32`, `String` | read-only; values as Python reads them | |
 | NumPy `float32` 1-D / 2-D (NumPy 2) | array, NumPy 2 promotion rules | `F32Array` / `F32Array2` |
 | `list` of `str` | read-only, copied in | `list[str]` |
 | `dict` with str/int keys and int/float/bool/str values | read-only, copied in | `dict[str, int]`, ... |
@@ -173,9 +175,16 @@ Ready-made compiled functions for AI applications (see [AI and agents](ai.md)):
 
 | Function | Returns |
 |---|---|
-| `cosine_top_k(query, matrix, k=10)` | `(indices, scores)` of the k most similar rows; float32 or float64; all CPU cores |
-| `top_k(scores, k)` | `(indices, scores)` of the k largest values, best first, ties by index |
-| `BM25(documents, k1=1.5, b=0.75)` | index with `.scores(query)` and `.search(query, k)`; Lucene-style idf |
+| `cosine_top_k(query, matrix, k=10, mask=None)` | `(indices, scores)` of the k most similar rows; float32 or float64; all CPU cores |
+| `hamming_top_k(query, matrix, k=10, mask=None)` | `(indices, distances)` of the k nearest binary codes (uint8, bits packed); nearest first |
+| `int8_top_k(query, matrix, k=10, mask=None)` | `(indices, scores)` by exact integer dot product of int8 vectors; no int32 copy |
+| `binarize(embeddings)` | uint8 codes, bit = value > 0, for `hamming_top_k` |
+| `quantize_int8(embeddings, scale=None)` | `(codes, scale)`: `round(x / scale)` clipped to ±127, for `int8_top_k` |
+| `top_k(scores, k, mask=None)` | `(indices, scores)` of the k largest values, best first, ties by index |
+| `BM25(documents=(), k1=1.5, b=0.75)` | index with `.scores(query)`, `.search(query, k, mask=None)`, `.add(docs)`, `.remove(ids)`, `.save(path)`, `BM25.load(path)`; Lucene-style idf |
+| `BM25Okapi(corpus, tokenizer=None, k1=1.5, b=0.75, epsilon=0.25)` | drop-in for `rank_bm25.BM25Okapi`: `get_scores`, `get_batch_scores`, `get_top_n`, `idf`, `doc_len`, `avgdl`, `doc_freqs`; plus `search`, `add`, `remove`, `save`, `load` |
+| `batch(fn, items, workers=None)` | `[fn(x) for x in items]` on a thread pool, results in order |
+| `tokenize_many(texts)`, `chunk_many(texts, size, overlap)` | `tokenize` / `chunk_text` for many texts on a thread pool |
 | `tokenize(text)` | lower-case runs of letters and digits |
 | `chunk_text(text, size=1000, overlap=200)` | pieces of at most `size` characters broken at spaces |
 | `ngrams(tokens, n=2)` | n-grams joined by spaces |
@@ -183,6 +192,8 @@ Ready-made compiled functions for AI applications (see [AI and agents](ai.md)):
 | `jaccard(tokens_a, tokens_b)` | shared distinct tokens / all distinct tokens |
 | `minhash(tokens, num_perm=128, seed=1)`, `minhash_similarity(a, b)` | signature (list of ints); estimated Jaccard similarity |
 | `token_f1(prediction, truth)`, `exact_match(prediction, truth)`, `rouge_l(candidate, reference)` | evaluation metrics |
+
+`mask` is a bool array over the rows (or document ids); only rows where it is `True` are returned. Index ids never change: `add()` returns the new ids and removed ids are never returned again. `save()` writes a `.npz` file without pickle.
 
 ## Command line
 

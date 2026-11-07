@@ -1,3 +1,42 @@
+# 0.7.3
+
+Five things AI and data engineers asked for: faster calls, pandas 3 and polars columns,
+a drop-in BM25 for `rank_bm25`, compact vector search with filters, and batches on all cores.
+
+**Faster calls**
+- Functions with `int`/`float`/`bool` arguments and a number, bool or `None` result get a
+  second native entry point that returns the value and the status in one struct. The
+  Python side no longer builds out-parameter objects; per-call cost is about half.
+- Fewer lock and dict operations per call; a failed fast call continues on the normal path
+  without running the native code twice.
+
+**pandas 3 and polars**
+- `@vectorize` compiles `str`, `bool` and `float32` columns (pandas 3 `str` dtype, `object`
+  columns of strings, polars `String`/`Boolean`/`Float32`, lists of str or bool) and may
+  return strings. polars Series in, polars Series out (works with `map_batches`).
+- `@optimize` accepts pandas `float32` Series, pandas Series of str and polars Series
+  (floats, ints, str) without nulls. Series of str allow `s[i]`, `len`, loops and
+  `sorted/list/set/min/max/join`; Series operators run as Python with a hint.
+
+**`pyrust_engine.ai`**
+- `BM25Okapi`: same constructor, attributes and scores as `rank_bm25.BM25Okapi`
+  (bit-for-bit, checked against the package in CI), compiled and sparse.
+- `BM25` and `BM25Okapi` indexes: `add()`, `remove()` (ids never change), `save()` /
+  `load()` (`.npz`, no pickle), `search(..., mask=)`.
+- `hamming_top_k` (binary codes, 32x smaller than float32) and `int8_top_k` (exact integer
+  dot products, no int32 copy), `binarize`, `quantize_int8`.
+- `mask=` filters on `cosine_top_k`, `top_k` and searches.
+- `batch`, `tokenize_many`, `chunk_many`: thread pools that keep input order.
+
+**Language**
+- `int.bit_count()`.
+- One-character strings use whole-string methods: `','.join(words)`, `'-'.split(...)`
+  (they did not compile before).
+
+**Platforms**
+- Free-threaded Python 3.14t is tested in CI on Linux, macOS and Windows; the GIL stays off.
+  `doctor` reports which build is running.
+
 # 0.7.2
 
 For AI engineers and agents: float32 embeddings, real string processing, lists, dicts and

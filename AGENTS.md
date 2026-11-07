@@ -25,11 +25,11 @@ This file is for AI coding assistants (Claude Code, Cursor, Copilot, Codex and o
 ### Good candidates (big speedups)
 
 - Loops doing arithmetic, `math`, bit operations or `random`.
-- Loops over NumPy arrays (`float64`, `int64`, `float32`), lists, strings and pandas columns.
+- Loops over NumPy arrays (`float64`, `int64`, `float32`), lists, strings, pandas columns (including pandas 3 `str` columns) and polars Series.
 - String processing: tokenizing, edit distance, parsing, chunking.
 - Counting and grouping with dicts and sets; building lists with `append`.
 - Helper functions called inside a loop, and recursion (annotate `-> int` / `-> float`).
-- A tiny function applied to every row: use `@vectorize`, not `@optimize`.
+- A tiny function applied to every row: use `@vectorize`, not `@optimize`. It takes NumPy arrays, lists, pandas and polars columns of numbers, bools or str.
 
 ### Poor candidates (leave as Python)
 
@@ -49,7 +49,8 @@ This file is for AI coding assistants (Claude Code, Cursor, Copilot, Codex and o
 | `d.get(k)` without a default | `d.get(k, 0)` |
 | float keys in a dict | int or str keys |
 | `x.attr` on objects / methods on classes | pass the numbers in as arguments |
-| `df.apply(f, axis=1)` | `@vectorize` on `f`, called with the columns |
+| `df.apply(f, axis=1)`, `s.map(f)`, polars `map_elements(f)` | `@vectorize` on `f`, called with the columns (polars: `map_batches`) |
+| `'x' in series`, `series + series` on a str Series | `series.tolist()` first (Series operators work element by element) |
 | NumPy slices `a[1:]` in a loop | index loops `for i in range(1, len(a))` |
 | float32 mixed with `np.float64` values | `float(x)` to compute in float64 |
 | `f"{x:.2f}"` (float formatting) | format outside the compiled function |
@@ -60,7 +61,10 @@ Lists, dicts and sets **passed in** are read-only inside compiled code. Build a 
 
 `pyrust_engine.ai` provides tested functions for AI apps:
 
-- **Retrieval:** `cosine_top_k`, `top_k`, `BM25`
+- **Retrieval:** `cosine_top_k`, `top_k`, `BM25` (all take `mask=` filters; indexes have `add`, `remove`, `save`, `load`)
+- **rank_bm25 replacement:** `BM25Okapi` (same API, same scores): change `from rank_bm25 import BM25Okapi` to `from pyrust_engine.ai import BM25Okapi`
+- **Compact vectors:** `hamming_top_k`, `int8_top_k`, `binarize`, `quantize_int8`
+- **Batches:** `batch`, `tokenize_many`, `chunk_many`
 - **Text:** `tokenize`, `chunk_text`, `ngrams`, `levenshtein`, `similarity`, `jaccard`
 - **Deduplication:** `minhash`, `minhash_similarity`
 - **Evaluation:** `token_f1`, `exact_match`, `rouge_l`
@@ -90,7 +94,7 @@ Servers don't need Rust if you ship prebuilt libraries:
 python -m pyrust_engine build module.py
 ```
 
-Then ship the generated `__pyrust__/` folder with the code. Compiled calls release the GIL, so `await asyncio.to_thread(fn, ...)` keeps web servers responsive.
+Then ship the generated `__pyrust__/` folder with the code. Compiled calls release the GIL, so `await asyncio.to_thread(fn, ...)` keeps web servers responsive. On free-threaded Python (3.14t) PyRust keeps the GIL off.
 
 ## Part 2: working on this repository
 

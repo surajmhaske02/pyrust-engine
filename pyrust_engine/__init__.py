@@ -25,7 +25,7 @@ __all__ = [
     'F32Array2',
     'prune_cache',
 ]
-__version__ = '0.7.2'
+__version__ = '0.7.3'
 
 
 def load_ipython_extension(ipython):

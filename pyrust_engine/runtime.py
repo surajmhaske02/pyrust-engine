@@ -361,7 +361,7 @@ class _Native:
         if description.fast_eligible():
             # Scalars in, one scalar out: value and status come back together in a struct.
             fast = lib.pyrust_fast
-            fast.argtypes = argtypes[: len(self.kinds)]
+            fast.argtypes = [*argtypes[: len(self.kinds)], ctypes.c_uint64]  # + iteration budget
             fast.restype = _FAST_RESULT[rt]
             self.fast = fast
 
@@ -990,7 +990,7 @@ class _Optimized:
                         for callee, code, defaults in native.code_guards:
                             if callee.__code__ is not code or callee.__defaults__ is not defaults:
                                 return general(args, kwargs)
-                    result = native.fast(*args)
+                    result = native.fast(*args, budget)
                     status = result.status
                     if status:
                         return general(args, kwargs, status)

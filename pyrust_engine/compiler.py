@@ -2641,9 +2641,9 @@ for r{j} in results{j} {{ let p{j} = r{j}?; {merge} }}
             fast = f"""#[repr(C)]
 pub struct PyrustFast {{ value: {value}, status: i32 }}
 #[no_mangle]
-pub unsafe extern "C" fn pyrust_fast({', '.join(scalar_ffi)})->PyrustFast{{
+pub unsafe extern "C" fn pyrust_fast({', '.join(scalar_ffi + ['fuel: u64'])})->PyrustFast{{
 QUIET.call_once(|| std::panic::set_hook(Box::new(|_| {{}})));
-let mut ctx = Ctx{{fuel: {int(self.max_iterations)}u64, cancel: std::ptr::null(), ticks: 0, rng: std::ptr::null_mut(), gauss: std::ptr::null_mut()}};
+let mut ctx = Ctx{{fuel, cancel: std::ptr::null(), ticks: 0, rng: std::ptr::null_mut(), gauss: std::ptr::null_mut()}};
 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute({', '.join(calls)})));
 match result {{ Ok(Ok(v)) => PyrustFast{{ value: {'v' if rt != 'none' else '0'}, status: 0 }}, Ok(Err(code)) => PyrustFast{{ value: {ZERO[rt] if rt != 'none' else '0'}, status: code }}, Err(_) => PyrustFast{{ value: {ZERO[rt] if rt != 'none' else '0'}, status: 8 }} }}
 }}
@@ -2702,7 +2702,6 @@ status
             all(self.types[p] in FAST_KINDS for p in self.params)
             and resolve(self.return_type) in FAST_RETURNS
             and not self.program['random']
-            and self.max_iterations < 2**64
         )
 
     # ---------------------------------------------------------- introspection

@@ -1,4 +1,4 @@
-"""Code generation for strings, growable lists, dicts and sets (0.7.2).
+"""Code generation for strings, growable lists, dicts and sets (0.7.3).
 
 Mixed into Compiler. Kinds: 'strv' (a string value), 'char', 'str' (a str argument),
 'flist' / 'ilist' (lists of numbers), 'slist' (list of str), 'dict(K,V)', 'set(K)'.

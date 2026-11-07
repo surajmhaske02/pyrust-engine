@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrust-engine"
-version = "0.7.2"
+version = "0.7.3"
 description = "Make Python code faster with one decorator: compiles numeric Python to Rust, with exact Python fallback"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
-keywords = ["performance", "rust", "compiler", "jit", "numpy", "pandas", "rag", "llm", "mcp", "speed"]
+keywords = ["performance", "rust", "compiler", "jit", "numpy", "pandas", "polars", "bm25", "rag", "llm", "mcp", "speed"]
 
 [project.scripts]
 pyrust-engine = "pyrust_engine.__main__:main"

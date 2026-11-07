@@ -176,7 +176,33 @@ def mean_gap(prices) -> float:          # pass a column: df["price"]
     return total / (len(prices) - 1)
 ```
 
-A `float64` or `int64` Series with the default index (`0..n-1`) is passed without copying. In Python, `s[i]` looks up the **label** `i`; with the default index that is position `i`, so `s[-1]` raises `KeyError` exactly as in Python. Use `s.iloc[i]` for positions, including negative ones. A Series with another index runs as Python with a hint (use `.reset_index(drop=True)`). Series are read-only in compiled code; write results into a NumPy array or list. For whole columns, `vectorize` (below) is usually simpler.
+A `float64`, `int64` or `float32` Series with the default index (`0..n-1`) is passed without copying. In Python, `s[i]` looks up the **label** `i`; with the default index that is position `i`, so `s[-1]` raises `KeyError` exactly as in Python. Use `s.iloc[i]` for positions, including negative ones. A Series with another index runs as Python with a hint (use `.reset_index(drop=True)`). Series are read-only in compiled code; write results into a NumPy array or list. For whole columns, `vectorize` (below) is usually simpler.
+
+**Text columns (pandas 3).** pandas 3 stores text in the `str` dtype. A Series of strings with no missing values compiles too (pandas 2 `object` columns of strings as well):
+
+```python
+@optimize
+def count_valid(emails) -> int:         # df["email"]
+    n = 0
+    for e in emails:
+        if e.find('@') > 0 and e.endswith('.com'):
+            n += 1
+    return n
+```
+
+`s[i]`, `len(s)`, loops over `s`, and `sorted`/`list`/`set`/`min`/`max`/`str.join` of `s` compile. Operators on the whole Series (`s + s`, `'x' in s`, `s == 'a'`) mean something different for a Series (element by element, or the index), so those functions run as Python, with a hint to pass `s.tolist()` instead. Columns with missing values (`NaN`, `None`) run as Python.
+
+## polars
+
+A polars Series without nulls is accepted where a list is: floats (`Float64`, `Float32`) and ints (`Int64` and smaller, `UInt32` and smaller) are read without copying where possible, and `String` columns work like a list of str. Like a list, `s[-1]` is the last value. Every value is exactly what Python sees when it reads the Series (Python `float`, `int`, `str`).
+
+For per-row functions, use `@vectorize` (below) instead of `map_elements`:
+
+```python
+import polars as pl
+
+df = df.with_columns(pl.col("email").map_batches(domain_length).alias("domain_len"))
+```
 
 ## Random numbers
 
@@ -213,10 +239,33 @@ def score(price: float, qty: int) -> float:
 
 score(prices, quantities)          # NumPy arrays or lists -> NumPy array
 score(df["price"], df["qty"])      # pandas columns -> Series with the same index
+score(pl_df["price"], pl_df["qty"])  # polars columns -> polars Series with the same name
 score(prices, 3)                   # plain numbers are reused for every element
+
+@vectorize
+def domain_length(email: str) -> int:
+    at = email.find("@")
+    return len(email) - at - 1 if at >= 0 else 0
+
+domain_length(df["email"])         # str column (pandas 3 'str', object, polars String, list of str)
+
+@vectorize
+def clean(text: str) -> str:       # str results too
+    return text.strip().lower()
 ```
 
-A tiny function called once per value from Python is dominated by call overhead, even natively. `vectorize` generates the loop, compiles it together with your function, and runs everything in one native call. It replaces `df.apply(lambda row: ...)` and list comprehensions over columns. Every element gets exactly the value your function returns in Python. Array arguments must have the same length. `@vectorize(parallel=True)` splits the elements across CPU cores. Inputs that can't be compiled (other dtypes, mixed lists) run the same loop in Python. Also available as `@optimize.vectorize`.
+A tiny function called once per value from Python is dominated by call overhead, even natively. `vectorize` generates the loop, compiles it together with your function, and runs everything in one native call. It replaces `df.apply(lambda row: ...)`, `Series.map`, polars `map_elements` and list comprehensions over columns. Every element gets exactly the value your function returns in Python. Array arguments must have the same length. `@vectorize(parallel=True)` splits the elements across CPU cores.
+
+| Column type | Compiled | The function receives |
+|---|---|---|
+| `float64`, `int64` (NumPy, pandas, polars, lists) | yes | the values |
+| `float32` (NumPy 2) | yes | `numpy.float32` values |
+| `bool` | yes | `True` / `False` |
+| `str` (pandas 3 `str`, `object` of str, polars `String`, list of str) | yes | `str` |
+| polars `Int32`, `Int16`, `Int8`, `UInt32`, ... | yes | `int` |
+| missing values, dates, categories, mixed lists | no: same loop in Python | the values |
+
+Results can be numbers, bools or strings (a NumPy array, or a Series as above). Also available as `@optimize.vectorize`.
 
 ## Web apps and threads
 
@@ -235,6 +284,10 @@ async def similarity(a: str, b: str):
 ```
 
 Several threads can run compiled functions at the same time on different cores. For servers without Rust, build the libraries ahead of time (see [Deployment](deployment.md)).
+
+**Free-threaded Python (3.14t).** On the free-threaded build there is no GIL at all, so the Python code between compiled calls runs in parallel too. PyRust loads no C extension, so it never turns the GIL back on; CI runs the full test suite on 3.14t and checks that the GIL stays off. `python -m pyrust_engine doctor` says which build you are on. `pyrust_engine.ai.batch(fn, items)` runs any function over many items on a thread pool.
+
+**Call cost.** Since 0.7.3 a call with only `int`/`float`/`bool` arguments and a number, bool or `None` result uses a shorter native entry point that returns the value and the status together, about half the previous per-call cost. Functions without a loop still run as plain Python by default, because even a short native call costs more than a few additions.
 
 ## Parallel loops
 
