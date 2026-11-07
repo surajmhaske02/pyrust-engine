@@ -23,6 +23,20 @@ New in 0.7.1 (Linux x86_64, Python 3.13, same CI setup):
 | `@vectorize` tiny function over 100k rows, vs a Python loop | 13.4 ms | 0.653 ms | 20x |
 | Variance of a 100k-float Python list (copy into native memory included) | 6.07 ms | 3.12 ms | 1.9x |
 
+New in 0.7.2 (Linux x86_64, Python 3.13):
+
+| Workload | Baseline | PyRust 0.7.2 | Speedup |
+|---|---:|---:|---:|
+| `ai.tokenize` on 1.1M characters | 60.4 ms (Python) | 15.4 ms | 3.9x |
+| Word count with a dict, 160k words | 22.9 ms (Python) | 13.3 ms | 1.7x |
+| `ai.token_f1` over 100 answer pairs (incl. call overhead) | 4.08 ms (Python) | 2.12 ms | 1.9x |
+| `ai.levenshtein`, two 500-character strings | 53.0 ms (Python) | 3.09 ms | 17x |
+| float32 dot product, 100k elements | 26.0 ms (Python) | 0.219 ms | 119x |
+| BM25 query, 1,977 documents | 27.9 ms (pure-Python BM25 scanning documents) | 0.106 ms | 263x |
+| Cosine top-10, 50k x 384 float32 | 20.2 ms (vectorized NumPy / BLAS) | 22.1 ms | 0.9x |
+
+Dict and string code gains less than numeric loops because CPython's own dicts and string methods are already written in C; the gain comes from removing the interpreter around them. For dense matrix–vector products NumPy's BLAS is the right tool; `cosine_top_k` is about even with it while avoiding temporary arrays.
+
 Lists are copied for each call, so simple work on big lists gains less; pass a NumPy array to skip the copy. `random` calls copy Python's generator state (about 5 KB) in and out once per call.
 
 ## Compared with Numba

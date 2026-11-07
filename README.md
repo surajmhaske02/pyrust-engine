@@ -108,7 +108,7 @@ hits = BM25(chunk_text(document, 800, 100)).search("fast python", k=3)
 
 For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file.py --write`, and `claude mcp add pyrust -- python -m pyrust_engine mcp`. See [AI and agents](https://surajmhaske02.github.io/pyrust-engine/ai/) and [`AGENTS.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/AGENTS.md).
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. 168 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
+> **Status: experimental.** Not a general Python compiler and not production-hardened. 191 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15.
 
 ## Comparison at a glance
 
@@ -126,6 +126,12 @@ For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file
 | Monte Carlo with `random.random()` (200k) · *0.7.1* | 24.9 ms · 1× | **3.38 ms · 7.4×** |
 | Tiny function over 100k rows: `@vectorize` vs a Python loop · *0.7.1* | 13.4 ms · 1× | **0.653 ms · 20×** |
 | Variance of a Python list (100k floats, copy included) · *0.7.1* | 6.07 ms · 1× | **3.12 ms · 1.9×** |
+| Tokenize 1.1M characters (`ai.tokenize`) · *0.7.2* | 60.4 ms · 1× | **15.4 ms · 3.9×** |
+| Word count with a dict (160k words) · *0.7.2* | 22.9 ms · 1× | **13.3 ms · 1.7×** |
+| Edit distance of two 500-char strings (`ai.levenshtein`) · *0.7.2* | 53.0 ms · 1× | **3.09 ms · 17×** |
+| float32 dot product (100k, NumPy 2 rules) · *0.7.2* | 26.0 ms · 1× | **0.219 ms · 119×** |
+| BM25 query over 1,977 documents · *0.7.2* | 27.9 ms · 1× | **0.106 ms · 263×** |
+| Cosine top-10 over 50k×384 float32 vs **NumPy BLAS** · *0.7.2* | 20.2 ms (NumPy) | **22.1 ms · 0.9×** |
 | Tiny `add(a, b)` per call | ≈1× | **≈1×** (runs as plain Python on purpose; use `@vectorize` for columns) |
 | JSON → array pipeline | 7.75 ms · 1× | **5.39 ms · 1.44×** |
 | Big integers / overflow / math errors | Exact | **Exact (replays in Python)** |
@@ -133,7 +139,7 @@ For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file
 | Runtime dependencies | None | **None** (NumPy for arrays; Rust only to compile) |
 | First call (compile) | None | 0.1–0.5 s (about 0.005 s from the disk cache) |
 
-<sub>"time · speedup vs Python", measured by CI on a GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Shared CI machines are noisy; treat the numbers as approximate. Raw data: [`benchmarks/`](https://github.com/surajmhaske02/pyrust-engine/tree/main/benchmarks).</sub>
+<sub>"time · speedup vs Python", measured by CI. BM25 is compared with a straightforward pure-Python BM25 that scans the documents for each query; cosine top-k is compared with vectorized NumPy, which is already native code (PyRust is about even there). Runner: GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Shared CI machines are noisy; treat the numbers as approximate. Raw data: [`benchmarks/`](https://github.com/surajmhaske02/pyrust-engine/tree/main/benchmarks).</sub>
 
 ![Speedup versus plain Python](https://cdn.jsdelivr.net/gh/surajmhaske02/pyrust-engine@main/docs/benchmark-speedup.svg)
 
@@ -364,7 +370,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Correctness evidence
 
-- **168 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
+- **191 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
 - **Edge cases** for every operation: NaN, ±0.0, ±inf, overflow, math domain errors, huge exponents and shifts, int/float comparisons around 2**53 and 2**63, writes that fail halfway, overlapping and read-only arrays, recursion depth, Ctrl-C on long calls, prebuilt libraries without Rust.
 - **Generated-program fuzzing:** random programs using the supported operators and `math` functions are compiled and compared with CPython on all three operating systems, including which exception is raised.
 - **Benchmark tracking:** every CI job compares its speedups with the last release and flags drops in the job summary.
