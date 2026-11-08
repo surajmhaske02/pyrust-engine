@@ -145,3 +145,34 @@ def domain_length(email: str) -> int:
     """Length of the domain part of an e-mail address (0 if there is no @)."""
     at = email.find('@')
     return len(email) - at - 1 if at >= 0 else 0
+
+
+class Body:
+    """A tiny physics body: the method reads and writes attributes in a loop."""
+
+    def __init__(self, x, y, vx, vy):
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+
+    def advance(self, dt: float, n: int) -> None:
+        for _ in range(n):
+            self.x += self.vx * dt
+            self.y += self.vy * dt
+            if self.y < 0.0:
+                self.vy = -self.vy
+                self.y = -self.y
+
+
+def short_sum(a) -> float:
+    """Sum of a (small) float64 array."""
+    t = 0.0
+    for x in a:
+        t += x
+    return t
+
+
+def vowel_count(text: str) -> int:
+    n = 0
+    for ch in text:
+        if ch in 'aeiou':
+            n += 1
+    return n

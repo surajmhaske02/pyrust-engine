@@ -156,6 +156,32 @@ def v073_rows(cache, rng):
         pass
     return rows
 
+def v075_rows(cache, rng):
+    """0.7.5: methods with self.x, and direct calls with small arrays and strings."""
+    from .workloads import Body, short_sum, vowel_count
+    rows=[]
+    def add(name, slow, fast, args, note, check):
+        check()
+        a=measure(slow,args);b=measure(fast,args)
+        rows.append({'name':name,'python':a,'pyrust':b,'python_over_pyrust':a['median_seconds']/b['median_seconds'],
+                     'note':note,'report':fast.report() if hasattr(fast,'report') else None})
+    step=optimize(Body.advance,cache_dir=cache,fallback=False)
+    def check_body():
+        a,b=Body(0.0,1.0,0.5,-2.0),Body(0.0,1.0,0.5,-2.0)
+        step(a,0.001,10_000);Body.advance(b,0.001,10_000);assert vars(a)==vars(b)
+    body=Body(0.0,1.0,0.5,-2.0)
+    add('method_self_attributes_20k_steps',Body.advance,step,(body,0.001,20_000),
+        'a method reading and writing self.x / self.vx (state written back after the call)',check_body)
+    small=rng.standard_normal(32);fast_sum=optimize(short_sum,cache_dir=cache,fallback=False)
+    many=lambda f,a:[f(a) for _ in range(1000)]
+    add('small_array_1000_calls',lambda a:many(short_sum,a),lambda a:many(fast_sum,a),(small,),
+        '1000 calls on a 32-element array (direct call, no ctypes)',lambda:assert_same(short_sum(small),fast_sum(small)))
+    word='programming language'
+    fast_vowels=optimize(vowel_count,cache_dir=cache,fallback=False)
+    add('short_string_1000_calls',lambda w:many(vowel_count,w),lambda w:many(fast_vowels,w),(word,),
+        '1000 calls on a 20-character string (direct call, no ctypes)',lambda:assert_same(vowel_count(word),fast_vowels(word)))
+    return rows
+
 def assert_same(a,b):
     assert a==b
 
@@ -226,6 +252,7 @@ def run():
                      'python_over_pyrust':a['median_seconds']/b['median_seconds'],'report':fast.report()})
         rows += ai_rows(cache, rng)
         rows += v073_rows(cache, rng)
+        rows += v075_rows(cache, rng)
         payload=json.dumps(rng.standard_normal(20_000).tolist())
         native=optimize(array_energy,cache_dir=cache,fallback=False);native.prepare()
         def pipeline(kernel):

@@ -1,4 +1,4 @@
-"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.4).
+"""Rust helpers for strings, lists of strings, dicts, sets and float32 (0.7.5).
 
 Every helper reproduces CPython's behaviour for the cases it accepts and returns an
 error status for anything else, so the call replays in Python:

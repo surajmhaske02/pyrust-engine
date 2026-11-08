@@ -24,11 +24,14 @@ from .compiler import (
     ARRAY_INFO,
     KNOWN_BUILTINS,
     LIST_KINDS,
+    NUMPY_KINDS,
     Compiler,
     Unsupported,
+    attribute_uses,
     default_kinds,
     is_packed,
     kind_of_value,
+    object_kind,
     tuple_parts,
 )
 from .toolchain import ToolchainError
@@ -125,6 +128,17 @@ _CAPI_NAMES = (
     'PyFunction_GetKwDefaults',
     'PyDict_GetItem',
 )
+# Appended after the type objects (order = PyApi in the generated Rust).
+_CAPI_MORE = (
+    'PyObject_GetBuffer',
+    'PyBuffer_Release',
+    'PyErr_Clear',
+    'PyUnicode_AsUCS4Copy',
+    'PyUnicode_GetLength',
+    'PyMem_Free',
+    'PyBytes_AsString',
+    'PyBytes_Size',
+)
 _CAPI: Any = None
 
 
@@ -141,7 +155,9 @@ def _capi():
                 api = ctypes.pythonapi
                 pointers = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_NAMES]
                 objects = [id(int), id(float), id(bool), id(True), id(False), id(None)]
-                table = (ctypes.c_void_p * (len(pointers) + len(objects)))(*pointers, *objects)
+                more = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_MORE]
+                values = [*pointers, *objects, *more, id(str), id(bytes)]
+                table = (ctypes.c_void_p * len(values))(*values)
                 new = api.PyCFunction_NewEx
                 new.argtypes = [ctypes.c_void_p, ctypes.py_object, ctypes.py_object]
                 new.restype = ctypes.py_object
@@ -166,6 +182,7 @@ class _PyCall(ctypes.Structure):
         ('guards', ctypes.c_void_p),
         ('ncode', ctypes.c_size_t),
         ('code_guards', ctypes.c_void_p),
+        ('ndarray', ctypes.c_void_p),
     ]
 
 
@@ -395,12 +412,14 @@ class _Native:
         'checks',
         'void',
         'py_def',
+        'objects',
     )
 
     def __init__(self, lib, description):
         self.lib = lib
         self.entry = lib.pyrust_run
         self.kinds = tuple(description.types[p] for p in description.params)
+        self.objects = description.objects  # param -> [(attr, kind, native name, assigned)]
         self.guards = description.guards
         self.code_guards = description.code_guards
         self.written = tuple(p in description.written for p in description.params)
@@ -416,7 +435,7 @@ class _Native:
                 argtypes += [ctypes.c_void_p, ctypes.c_size_t]
             else:
                 argtypes.append(_CTYPE[kind])
-        self.has_arrays = self.has_arrays or any(is_packed(k) for k in self.kinds)
+        self.has_arrays = self.has_arrays or any(is_packed(k) for k in self.kinds) or bool(self.objects)
         rt = self.returns
         self.free = None
         if is_packed(rt):
@@ -446,10 +465,11 @@ class _Native:
         self.void = rt == 'none'
         self.fast = None
         self.py_def = None
-        if description.fast_eligible():
+        if description.direct_eligible():
             self.py_def = lib.pyrust_py_def
             self.py_def.argtypes = [ctypes.c_void_p]
             self.py_def.restype = ctypes.c_void_p
+        if description.fast_eligible():
             # Scalars in, one scalar out: value and status come back together in a struct.
             fast = lib.pyrust_fast
             fast.argtypes = [*argtypes[: len(self.kinds)], ctypes.c_uint64]  # + iteration budget
@@ -567,9 +587,96 @@ def _unsupported_value(value):
     return f'{type(value).__name__} values are not compiled'
 
 
-_SCALAR_KINDS = {float: 'f64', bool: 'bool'}
+# ------------------------------------------------------------------ objects
 _I64_MIN = -9223372036854775808
 _I64_MAX = 9223372036854775807
+_MISSING_ATTR = object()
+_ATTRIBUTE_KINDS = ('i64', 'f64', 'bool', 'str', 'bytes', *NUMPY_KINDS)
+
+
+def _object_uses(fn):
+    """{param: {attr: assigned?}} for parameters the function uses only through attributes."""
+    try:
+        node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+    except (OSError, TypeError, SyntaxError, IndentationError):
+        return {}
+    if not isinstance(node, ast.FunctionDef):
+        return {}
+    return attribute_uses(node, list(inspect.signature(fn).parameters))
+
+
+def _read_attribute(value, attr):
+    """(found, value) following Python's lookup for plain attributes only: a data descriptor
+    other than a __slots__ member (a property, ...) or a method counts as not found, so the
+    call runs as Python."""
+    cls = type(value)
+    static = _MISSING_ATTR
+    for klass in cls.__mro__:
+        if attr in klass.__dict__:
+            static = klass.__dict__[attr]
+            break
+    if static is not _MISSING_ATTR:
+        kind = type(static)
+        if hasattr(kind, '__set__') or hasattr(kind, '__delete__'):
+            if kind is types.MemberDescriptorType:
+                try:
+                    return True, static.__get__(value, cls)
+                except AttributeError:
+                    return False, None
+            return False, None
+    try:
+        own = object.__getattribute__(value, '__dict__')
+    except AttributeError:
+        own = None
+    if own is not None and attr in own:
+        return True, own[attr]
+    if static is not _MISSING_ATTR and not hasattr(type(static), '__get__'):
+        return True, static  # a plain class attribute
+    return False, None
+
+
+def _object_kind(value, uses):
+    """'obj(attr:kind,...)' when every attribute the function uses is a plain attribute with
+    a supported value, else None (the call runs as Python)."""
+    cls = type(value)
+    if cls.__getattribute__ is not object.__getattribute__:
+        return None
+    if any(uses.values()) and cls.__setattr__ is not object.__setattr__:
+        return None  # frozen dataclasses and custom __setattr__ keep their own rules
+    parts = []
+    for attr in sorted(uses):
+        found, item = _read_attribute(value, attr)
+        if not found:
+            return None
+        t = type(item)
+        kind = (
+            ('i64' if _I64_MIN <= item <= _I64_MAX else None)
+            if t is int
+            else _SCALAR_KINDS.get(t) or kind_of_value(item)
+        )
+        if kind not in _ATTRIBUTE_KINDS or (uses[attr] and kind not in ('i64', 'f64')):
+            return None
+        parts.append((attr, kind))
+    return object_kind(parts)
+
+
+class _AttributeCell:
+    """An assigned number attribute, handled like a one-element list: read into the native
+    buffer before the call, written back with setattr only after the call succeeds."""
+
+    __slots__ = ('obj', 'attr')
+
+    def __init__(self, obj, attr):
+        self.obj, self.attr = obj, attr
+
+    def __iter__(self):
+        return iter((_read_attribute(self.obj, self.attr)[1],))
+
+    def __setitem__(self, index, values):
+        setattr(self.obj, self.attr, values[0])
+
+
+_SCALAR_KINDS = {float: 'f64', bool: 'bool', str: 'str'}
 
 
 def _kinds_of(values):
@@ -689,6 +796,7 @@ class _Optimized:
         self.specs = {}  # kinds tuple -> _Native or _Failure
         self.sources = {}  # kinds tuple -> Rust source
         self.worker = None
+        self.object_uses = _object_uses(fn)  # parameters used only through their attributes
         self.direct = [None]  # the installed direct entry point (a C function object) or None
         self.direct_state = None  # (_PyCall, objects it points to)
         self.direct_base = 0  # calls counted by entry points removed by reset()
@@ -857,7 +965,8 @@ class _Optimized:
         return self.report()
 
     def install_direct(self, native):
-        """Let CPython call the native code directly for this specialization (scalars only).
+        """Let CPython call the native code directly for this specialization (numbers, NumPy
+        arrays, str and bytes in; a number, bool or None out).
 
         The entry point checks argument types, the function's code and defaults and every
         global it depends on; anything else goes to the Python path, so results are the same.
@@ -892,6 +1001,7 @@ class _Optimized:
             guards=ctypes.addressof(guard_array),
             ncode=len(code_guards) // 3,
             code_guards=ctypes.addressof(code_array),
+            ndarray=_address(getattr(sys.modules.get('numpy'), 'ndarray', None)),
         )
         try:
             entry = new(native.py_def(ctypes.addressof(table)), ctypes.addressof(state), None)
@@ -923,6 +1033,34 @@ class _Optimized:
         return self.report()
 
     # ------------------------------------------------------------------- call
+    def with_objects(self, values, kinds):
+        """Kinds with object arguments filled in (attribute kinds), or the kinds unchanged."""
+        out = list(kinds)
+        objects = []
+        for i, (name, value) in enumerate(zip(self.signature.parameters, values)):
+            if out[i] is None and name in self.object_uses:
+                out[i] = _object_kind(value, self.object_uses[name])
+                objects.append((value, any(self.object_uses[name].values())))
+        # The same object passed twice, with attributes assigned: Python's order of writes matters.
+        for j, (obj, assigned) in enumerate(objects):
+            if any(other is obj and (assigned or other_assigned) for other, other_assigned in objects[:j]):
+                return kinds
+        return tuple(out)
+
+    def expand(self, values, native):
+        """Argument names and values with each object replaced by the attributes the code uses."""
+        names, out = [], []
+        for name, value in zip(self.signature.parameters, values):
+            entries = native.objects.get(name)
+            if entries is None:
+                names.append(name)
+                out.append(value)
+                continue
+            for attr, _, _, assigned in entries:
+                names.append(f'{name}.{attr}')
+                out.append(_AttributeCell(value, attr) if assigned else _read_attribute(value, attr)[1])
+        return names, out
+
     def convert(self, values, native):
         """Native arguments, plus objects to keep alive and lists to copy back after success."""
         args = []
@@ -930,7 +1068,10 @@ class _Optimized:
         copies = []
         lists = []
         ranges = [] if native.any_written else None
-        for name, kind, value, writes in zip(self.signature.parameters, native.kinds, values, native.written):
+        names = self.signature.parameters
+        if native.objects:
+            names, values = self.expand(values, native)
+        for name, kind, value, writes in zip(names, native.kinds, values, native.written):
             if kind in LIST_KINDS:
                 # Lists are copied into a typed buffer; written lists get the new values back.
                 if any(other is value and (writes or other_writes) for other, other_writes in lists):
@@ -1026,6 +1167,7 @@ class _Optimized:
         state = self.state
         metrics_lock = self.metrics_lock
         python_call = self.python_call
+        object_uses = self.object_uses
         timing = self.timing
         budget = self.max_iterations or FAST_BUDGET
         strict_budget = self.max_iterations is not None
@@ -1050,6 +1192,8 @@ class _Optimized:
                 else:
                     values = args  # fast path: exact positional call
                 kinds = known_kinds if known_kinds is not None else _kinds_of(values)
+                if object_uses and None in kinds:
+                    kinds = self.with_objects(values, kinds)
                 native = specs.get(kinds)
                 if native is None:
                     if None in kinds:

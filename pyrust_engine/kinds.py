@@ -55,7 +55,22 @@ ITEM_KINDS = ('i64', 'f64', 'bool', 'strv')
 # Kinds served by the pyrust_fast entry point (value and status returned together).
 FAST_KINDS = ('i64', 'f64', 'bool')
 FAST_RETURNS = ('i64', 'f64', 'bool', 'none')
+# Kinds the direct CPython entry point reads itself (numbers, NumPy arrays, str, bytes).
+DIRECT_KINDS = ('i64', 'f64', 'bool', 'array', 'iarray', 'array2', 'iarray2', 'farray', 'farray2', 'str', 'bytes')
 PLACEHOLDERS = {'list?': 'flist', 'dict?': 'dict(i64,i64)', 'set?': 'set(i64)'}
+
+
+def object_kind(parts):
+    """'obj(attr:kind,...)': an object whose attributes the function reads or writes."""
+    return 'obj(' + ','.join(f'{a}:{k}' for a, k in parts) + ')'
+
+
+def object_parts(kind):
+    """[(attr, kind)] of an object kind, or None for other kinds."""
+    if not (isinstance(kind, str) and kind.startswith('obj(')):
+        return None
+    body = kind[4:-1]
+    return [tuple(part.split(':')) for part in body.split(',')] if body else []
 
 
 def tuple_kind(kinds):
