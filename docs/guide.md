@@ -267,6 +267,45 @@ A tiny function called once per value from Python is dominated by call overhead,
 
 Results can be numbers, bools or strings (a NumPy array, or a Series as above). Also available as `@optimize.vectorize`.
 
+## Classes and methods
+
+Methods compile when they use their objects through attributes: reading `self.x`, assigning `self.x = ...` and `self.x += ...`.
+
+```python
+from dataclasses import dataclass
+from pyrust_engine import optimize
+
+@dataclass
+class Particle:
+    x: float
+    vx: float
+    steps: int = 0
+
+    @optimize
+    def advance(self, dt: float, n: int) -> None:
+        for _ in range(n):
+            self.x += self.vx * dt
+            self.steps += 1
+
+p = Particle(0.0, 2.0)
+p.advance(0.01, 1_000_000)          # runs natively; p.x and p.steps are updated
+```
+
+Each attribute the method uses is read before the call and passed to the native code as its own value. Assigned attributes are written back with `setattr` only after the native call succeeds. If anything goes wrong (overflow, an error, a value the native code can't handle), Python runs the method from the start on the untouched object, so the result and the object's state are exactly what plain Python gives. The same works for plain functions that take objects (`def transfer(a, b, amount)`).
+
+| Attribute | Read | Assign |
+|---|---|---|
+| `int`, `float` | yes | yes (int stays int, float stays float) |
+| `bool`, `str`, `bytes` | yes | no (runs as Python) |
+| NumPy array (`self.data[i] = v` writes into it) | yes | no rebinding |
+| anything else (lists, dicts, other objects) | runs as Python | runs as Python |
+
+Instance attributes, class attributes (`rate = 0.01` in the class body), `__slots__` and dataclasses all work. These run as Python, with the same result:
+
+- properties and other descriptors, custom `__getattribute__` or `__setattr__`, frozen dataclasses (assigning raises `FrozenInstanceError` exactly as in Python);
+- calling a method on the object (`self.helper()`), passing the object on, comparing it, `del self.x`: `explain()` suggests making the helper a plain function that takes the values;
+- the same object passed twice when attributes are assigned.
+
 ## Web apps and threads
 
 A compiled call runs without holding Python's global interpreter lock, so CPU-heavy work in a web endpoint can run in a worker thread while the event loop keeps serving requests:
@@ -287,7 +326,7 @@ Several threads can run compiled functions at the same time on different cores. 
 
 **Free-threaded Python (3.14t).** On the free-threaded build there is no GIL at all, so the Python code between compiled calls runs in parallel too. PyRust loads no C extension, so it never turns the GIL back on; CI runs the full test suite on 3.14t and checks that the GIL stays off. `python -m pyrust_engine doctor` says which build you are on. `pyrust_engine.ai.batch(fn, items)` runs any function over many items on a thread pool.
 
-**Call cost.** Since 0.7.4, a function with only `int`/`float`/`bool` arguments and a number, bool or `None` result is called by CPython directly: a C-level entry point checks the argument types, the function's code and every global it uses, runs the native code without the GIL, and builds the result, in about 0.2 µs. Anything else (keyword arguments, other types, big ints, a changed global) takes the normal path, so results never change. `fn.report()['dispatch']` is `'direct'` when this is in use; `PYRUST_DIRECT_CALLS=0` turns it off. Calls with arrays, strings or containers cost 1–3 µs. Functions without a loop still run as plain Python by default (a Python call costs about 0.05 µs).
+**Call cost.** A function whose arguments are numbers, NumPy arrays, `str` or `bytes` and whose result is a number, bool or `None` is called by CPython directly: a C-level entry point checks the argument types (exact `int`/`float`/`bool`/`str`/`bytes`/`numpy.ndarray`, dtype, C order, alignment, writability, no overlapping writes), the function's code and every global it uses, runs the native code without the GIL, and builds the result, in about 0.2 µs for numbers and 0.3–0.5 µs with arrays or strings (since 0.7.4 for numbers, 0.7.5 for arrays and strings). Anything else takes the normal path, so results never change. `fn.report()['dispatch']` is `'direct'` when this is in use; `PYRUST_DIRECT_CALLS=0` turns it off. Lists, dicts, objects and returned strings or arrays cost 1–3 µs per call. Functions without a loop still run as plain Python by default (a Python call costs about 0.05 µs).
 
 ## Parallel loops
 

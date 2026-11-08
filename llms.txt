@@ -4,6 +4,7 @@
 
 Key facts for assistants:
 
+- **Methods work:** `self.x` reads and `self.x += ...` assignments of numbers compile (dataclasses, `__slots__`, plain classes); state is written back only after success.
 - **Use `@optimize` on functions with loops:** arithmetic, `math`, `random`, NumPy arrays (`float64`/`int64`/`float32`), lists, strings, dicts, sets, pandas columns (pandas 3 `str` too) and polars Series.
 - **Use `@vectorize` for a one-row function over whole columns.** It is about 20x faster than `df.apply`/`Series.map` on number and bool columns and 3–4x on text columns (polars `map_elements` too).
 - **Check before decorating:** `python -m pyrust_engine suggest file.py --json`, or the MCP tool `check_code`. `apply file.py --write` adds the decorator automatically.

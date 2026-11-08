@@ -128,7 +128,7 @@ pl_df.with_columns(pl.col("email").map_batches(domain))   # polars
 
 For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file.py --write`, and `claude mcp add pyrust -- python -m pyrust_engine mcp`. See [AI and agents](https://surajmhaske02.github.io/pyrust-engine/ai/) and [`AGENTS.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/AGENTS.md).
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. 242 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t.
+> **Status: experimental.** Not a general Python compiler and not production-hardened. 257 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t.
 
 ## Comparison at a glance
 
@@ -158,6 +158,8 @@ For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file
 | `@vectorize` over a 200k-row text column vs pandas `Series.map` · *0.7.4* | 83.3 ms | **18.4 ms · 4.5×** |
 | `tokenize_many`, 2,000 documents, vs `tokenize` one by one (both compiled) · *0.7.4* | 242 ms | **147 ms · 1.65×** |
 | Native call of a tiny function (`native_loop_free=True`) · *0.7.4* | 0.046 µs (Python) | **0.18 µs** (0.7.3: 2.8 µs) |
+| A method updating `self.x`… over 20k steps · *0.7.5* | 2.12 ms | **0.176 ms · 12×** |
+| 1000 calls on a 32-element NumPy array · *0.7.5* | 3.91 ms | **0.44 ms · 8.9×** (direct calls with arrays) |
 | Tiny `add(a, b)` per call | ≈1× | **≈1×** (runs as plain Python on purpose; use `@vectorize` for columns) |
 | JSON → array pipeline | 7.75 ms · 1× | **5.39 ms · 1.44×** |
 | Big integers / overflow / math errors | Exact | **Exact (replays in Python)** |
@@ -203,9 +205,10 @@ Float recurrences and `math`-heavy loops gain less because the floating-point wo
 | **pandas / polars** | Series of numbers or str: `s[i]`, `s.iloc[i]`, `len(s)`, `for x in s`; `@vectorize` over whole columns (numbers, bools, str) |
 | **`math`** | `sqrt exp log log2 log10 sin cos tan asin acos atan atan2 sinh cosh tanh fabs copysign fmod floor ceil trunc isnan isinf isfinite pi e tau inf nan` |
 | **Arrays** | `a[i]`, `a[i, j]`, `a.shape`, `len(a)`, `for x in a`, writes (`a[i] = v`, `+=`), new arrays with `np.zeros/empty/ones(_like)` that can be returned |
+| **Classes** | methods and functions reading `obj.x` and assigning number attributes (`self.x += v`); dataclasses, `__slots__`, class attributes |
 | **Functions** | calls to your own functions (keyword and default arguments, recursion with a `-> int`/`-> float` annotation), module-level constants |
 
-Everything else (classes, `print`, `try`, float formatting, NumPy slices, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
+Everything else (method calls on objects, `print`, `try`, float formatting, NumPy slices, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
 
 ## What makes Python slow, and what PyRust does about it
 
@@ -221,7 +224,7 @@ Everything else (classes, `print`, `try`, float formatting, NumPy slices, …) s
 | Crossing into native code has a fixed cost | tiny functions called millions of times | ✅ `@vectorize` runs them over whole arrays in one call; ✅ since 0.7.4 CPython calls the native code directly: about 0.2 µs per call (was 2–4.5 µs) |
 | Python values are generic objects | lists, text processing, counting | ✅ Lists, strings, dicts and sets as native data, with Python's exact rules |
 | Random numbers go through Python calls | simulations, Monte Carlo | ✅ Python's own generator algorithm, natively, same sequence |
-| Objects and classes are dynamic | classes, JSON documents | ❌ Not compiled. Use the right library, PyPy or CPython's JIT |
+| Objects and classes are dynamic | methods, dataclasses | ✅ since 0.7.5 `self.x` reads and assignments compile (numbers, str, NumPy arrays); ❌ method calls on objects, JSON documents |
 | I/O waits | network, disk, database | ❌ Not a CPU problem: use `asyncio` or threads |
 
 ## Version comparison
@@ -240,7 +243,7 @@ Everything else (classes, `print`, `try`, float formatting, NumPy slices, …) s
 | Developer tools | `explain()`, warnings, `check` | + type hints, API docs | **+ hints in messages, Jupyter magics, docs website** |
 | Tests / CI | 89 / 3 OSes × 3 Pythons | 128 | **150 / 3 OSes × Python 3.10–3.15, lint, coverage, benchmark tracking** |
 
-**0.7.1** added lists, `str`/`bytes`, pandas Series, the `random` module and `@vectorize`. **0.7.2** added float32, string values, growable lists, dicts and sets, the `pyrust_engine.ai` library, `suggest`/`apply` and an MCP server. **0.7.3** added pandas 3 text columns and polars, a drop-in `BM25Okapi` for `rank_bm25`, index add/remove/save/load, binary and int8 search with filters, batches on all cores, and free-threaded Python support. **0.7.4 (current)** lets CPython call compiled functions directly (about 0.2 µs per call instead of 2–3 µs), and makes text columns and text batches 2–4× faster. Older releases: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
+**0.7.1** added lists, `str`/`bytes`, pandas Series, the `random` module and `@vectorize`. **0.7.2** added float32, string values, growable lists, dicts and sets, the `pyrust_engine.ai` library, `suggest`/`apply` and an MCP server. **0.7.3** added pandas 3 text columns and polars, a drop-in `BM25Okapi` for `rank_bm25`, index add/remove/save/load, binary and int8 search with filters, batches on all cores, and free-threaded Python support. **0.7.4** let CPython call compiled functions directly (about 0.2 µs per call instead of 2–3 µs), and made text columns and text batches 2–4× faster. **0.7.5 (current)** compiles methods (`self.x` reads and assignments; dataclasses, `__slots__`) and extends direct calls to NumPy arrays, `str` and `bytes`. Older releases: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
 
 ## Install
 
@@ -381,7 +384,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Limitations
 
-- **A subset of Python.** No classes, methods on your objects, closures, generators, `try`/`with`, float formatting, NumPy slices or `print` in compiled code (they run as Python).
+- **A subset of Python.** Methods compile only through attribute reads and number assignments (`self.x`, `self.x += 1`); calling methods on objects, closures, generators, `try`/`with`, float formatting, NumPy slices or `print` in compiled code (they run as Python).
 - **Containers hold one type** (a list of floats, a dict of str to int, ...). Lists, dicts and sets passed in are copied: lists of numbers are written back, lists of strings, dicts and sets are read-only. For simple work on big lists the copy dominates (variance of 100k floats: 1.9×); NumPy arrays avoid it. Looping over a set isn't compiled (no reproducible order); `sorted(s)` is.
 - **Strings:** `lower`/`upper`/`is...` are native for ASCII; other characters replay in Python (same result, slower).
 - **float32** needs NumPy 2; mixing float32 with values from float64 arrays runs as Python.
@@ -389,7 +392,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 - **`min`/`max` over mixed int and float**, `round(x, ndigits)` and `math.hypot` aren't compiled (Python's results depend on details native code can't match exactly).
 - **NumPy scalars:** in Python, `a[i]` gives `np.float64`; PyRust returns a plain `float` with the same value.
 - **Recursion** needs a return annotation and runs natively up to 300 levels deep.
-- **Per-call overhead:** about 0.2 µs for calls with `int`/`float`/`bool` arguments (CPython calls the native code directly), 1–3 µs with arrays, strings or containers (via `ctypes`). A plain Python call costs about 0.05 µs, so loop-free functions still run as Python by default.
+- **Per-call overhead:** about 0.2–0.4 µs for calls with numbers, NumPy arrays, `str` or `bytes` returning a number, bool or `None` (CPython calls the native code directly); 1–3 µs otherwise (lists, dicts, returned strings or arrays, objects; via `ctypes`). A plain Python call costs about 0.05 µs, so loop-free functions still run as Python by default.
 - **First call compiles** (0.1–0.5 s, cached on disk). Use `fn.prepare()` or ship [prebuilt](#deploy-without-rust) libraries.
 - **Arrays:** 1-D and 2-D, C-contiguous `float64` / `int64` / `float32`. pandas Series need a `float64`/`int64`/`float32`/`str` dtype, no missing values and the default index; polars Series need no nulls. Series of str only support `s[i]`, `len`, loops and `sorted/list/set/min/max/join` (Series operators work element by element and run as Python).
 - **`batch`/`tokenize_many` with the GIL** only run the native part in parallel; converting text in and out still takes turns (`tokenize_many`: 1.7–1.9×).
@@ -399,7 +402,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Correctness evidence
 
-- **242 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t (3 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
+- **257 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t (3 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
 - **Edge cases** for every operation: NaN, ±0.0, ±inf, overflow, math domain errors, huge exponents and shifts, int/float comparisons around 2**53 and 2**63, writes that fail halfway, overlapping and read-only arrays, recursion depth, Ctrl-C on long calls, prebuilt libraries without Rust.
 - **Generated-program fuzzing:** random programs using the supported operators and `math` functions are compiled and compared with CPython on all three operating systems, including which exception is raised.
 - **Benchmark tracking:** every CI job compares its speedups with the last release and flags drops in the job summary.
@@ -441,8 +444,8 @@ docs/            documentation website (MkDocs), API.md, benchmark chart
 
 ## Roadmap
 
-1. **Direct calls for more types:** arrays, strings and lists still go through `ctypes` (1–3 µs).
-2. **Classes:** methods on simple classes and dataclasses with number fields.
+1. **Direct calls for more types:** lists, dicts, objects and returned strings or arrays still go through `ctypes` (1–3 µs).
+2. **More of classes:** calling other methods (`self.helper()`), lists and objects as attributes.
 3. **More array types:** `int32`, `uint8`, `bool` arrays in `@optimize`, 3-D arrays and slices like `a[i, :]`.
 4. **LSH buckets for `minhash`** (near-duplicates in near-linear time), MMR and rank fusion helpers.
 5. **Faster dense array writes** (an optimised path for functions that fill whole arrays).

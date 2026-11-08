@@ -1,3 +1,29 @@
+# 0.7.5
+
+Classes, and direct calls for arrays and strings.
+
+**Methods and objects**
+- `self.x` and `obj.x` compile: reading attributes (int, float, bool, str, bytes, NumPy
+  arrays) and assigning int and float attributes (`self.x = ...`, `self.x += ...`).
+  Dataclasses, `__slots__`, plain classes and class attributes work; `@optimize` can be
+  used directly on a method.
+- Each attribute becomes its own native value; assigned attributes are written back only
+  after the native call succeeds, so a replay in Python starts from the untouched object.
+- Properties, custom `__getattribute__`/`__setattr__`, frozen dataclasses, calling methods
+  on the object and aliasing run as Python with the same result.
+- A method updating `self.x`, `self.y`, `self.vx`, `self.vy` in a 20k-step loop: 7.8–12x
+  faster than plain Python (CI, Python 3.13).
+
+**Direct calls with arrays, str and bytes**
+- The direct CPython entry point now also takes NumPy arrays (read through the buffer
+  protocol, without copying), `str` and `bytes`, with the same checks as before: exact
+  types and dtypes, C-contiguous, aligned, writable when written, no overlapping writes.
+- 1000 calls on a 32-element array: 6.1–8.9x faster than plain Python (about 0.4 µs per
+  call); 1000 calls on a 20-character string: 1.8–3.0x. `ai.token_f1` (two str arguments)
+  went from 1.9x to 4.6x.
+
+257 tests pass on Linux, macOS and Windows (Python 3.10–3.15) and free-threaded 3.14t.
+
 # 0.7.4
 
 Faster calls and faster text: the two weak spots measured in 0.7.3.

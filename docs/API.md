@@ -1,4 +1,4 @@
-# PyRust Engine API reference (0.7.4)
+# PyRust Engine API reference (0.7.5)
 
 Everything public is importable from `pyrust_engine`:
 
@@ -111,6 +111,7 @@ A function is compiled once per combination of argument types it is actually cal
 | `list` of `str` | read-only, copied in | `list[str]` |
 | `dict` with str/int keys and int/float/bool/str values | read-only, copied in | `dict[str, int]`, ... |
 | `set` / `frozenset` of str or int | read-only, copied in | `set[str]`, `frozenset[int]` |
+| any object used only as `obj.x` (incl. `self`) | each attribute read before the call; assigned int/float attributes written back after success | |
 
 Return values: one scalar type (including `np.float32`), a string, a tuple of scalars, a new NumPy array, a list (of floats, ints or strings), a dict or a set created in the function, or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
 

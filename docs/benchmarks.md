@@ -71,6 +71,18 @@ New in 0.7.4 (CI, Python 3.13):
 
 Calls with `int`/`float`/`bool` arguments now go from CPython straight into the native code (no `ctypes`), which makes a native call about 10x cheaper. Text columns are passed as one string with row offsets, and each row is a view into it, so there is no per-row conversion. Batches process groups of documents per native call.
 
+New in 0.7.5 (CI, Python 3.13):
+
+| Workload | Baseline | Linux | macOS | Windows |
+|---|---|---:|---:|---:|
+| Method updating `self.x`, `self.y`, `self.vx`, `self.vy`, 20k steps | plain Python | **12x** | 7.8x | 10x |
+| 1000 calls on a 32-element float64 array | plain Python | **8.9x** | 6.1x | 6.3x |
+| 1000 calls on a 20-character string | plain Python | **1.8x** | 3.0x | 2.1x |
+
+Methods pass each attribute as its own native value and write assigned ones back once, after the loop. Calls with NumPy arrays, `str` and `bytes` now skip `ctypes`: the arrays are read through the buffer protocol without copying.
+
+Note: string- and dict-heavy rows (`dict_word_count`, `str_tokenize`) vary a lot between CI machines (1.0–1.9x for the word count on Linux within one run, across Python versions); compare several runs before reading a change into them.
+
 ## Compared with Numba
 
 The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12. Speedup over plain Python in that run:

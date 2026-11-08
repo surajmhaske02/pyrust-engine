@@ -29,6 +29,7 @@ This file is for AI coding assistants (Claude Code, Cursor, Copilot, Codex and o
 - String processing: tokenizing, edit distance, parsing, chunking.
 - Counting and grouping with dicts and sets; building lists with `append`.
 - Helper functions called inside a loop, and recursion (annotate `-> int` / `-> float`).
+- Methods and functions that read and assign `self.x` / `obj.x` (numbers, str, NumPy arrays): dataclasses, `__slots__` and plain classes.
 - A tiny function applied to every row: use `@vectorize`, not `@optimize`. It takes NumPy arrays, lists, pandas and polars columns of numbers, bools or str.
 
 ### Poor candidates (leave as Python)
@@ -48,7 +49,8 @@ This file is for AI coding assistants (Claude Code, Cursor, Copilot, Codex and o
 | looping over a set | `for x in sorted(s)` |
 | `d.get(k)` without a default | `d.get(k, 0)` |
 | float keys in a dict | int or str keys |
-| `x.attr` on objects / methods on classes | pass the numbers in as arguments |
+| `self.helper()` inside a compiled method | a plain helper function that takes the values (`helper(self.x)`) |
+| attributes holding lists, dicts or objects | NumPy arrays or plain numbers as attributes, or pass them in |
 | `df.apply(f, axis=1)`, `s.map(f)`, polars `map_elements(f)` | `@vectorize` on `f`, called with the columns (polars: `map_batches`) |
 | `'x' in series`, `series + series` on a str Series | `series.tolist()` first (Series operators work element by element) |
 | NumPy slices `a[1:]` in a loop | index loops `for i in range(1, len(a))` |
