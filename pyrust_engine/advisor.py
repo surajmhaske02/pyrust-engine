@@ -17,6 +17,7 @@ import inspect
 import re
 import runpy
 import sys
+import textwrap
 from pathlib import Path
 
 _REASON = re.compile(r'^(?P<function>[^,]+), line (?P<line>\d+): (?P<message>.*?)(?:: `(?P<code>.*)`)?$')
@@ -68,8 +69,108 @@ def _load(path):
         sys.path[:] = old_path
 
 
+def _annotation_kind(annotation):
+    from .compiler import ANNOTATIONS
+
+    try:
+        kind = ANNOTATIONS.get(annotation)
+    except TypeError:
+        return None
+    if kind is None and annotation in (str, 'str'):
+        return 'str'
+    if kind is None and annotation in (bytes, 'bytes'):
+        return 'bytes'
+    return kind
+
+
+def _init_kinds(cls):
+    """Attribute kinds from __init__: self.x = <number/str constant> or self.x = <annotated parameter>."""
+    init = cls.__dict__.get('__init__')
+    if not inspect.isfunction(init):
+        return {}
+    try:
+        node = ast.parse(textwrap.dedent(inspect.getsource(init))).body[0]
+    except (OSError, TypeError, SyntaxError, IndentationError):
+        return {}
+    params = {a.arg: a.annotation for a in node.args.args}
+    hints = getattr(init, '__annotations__', {})
+    found = {}
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Assign):
+            continue
+        for target in sub.targets:
+            if not (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)):
+                continue
+            value = sub.value
+            if isinstance(value, ast.Constant) and type(value.value) in (int, float, bool, str):
+                found.setdefault(target.attr, _annotation_kind(type(value.value)))
+            elif isinstance(value, ast.Name) and value.id in params and value.id in hints:
+                found.setdefault(target.attr, _annotation_kind(hints[value.id]))
+    return {k: v for k, v in found.items() if v}
+
+
+def method_kinds(cls, function, node):
+    """Kinds to check a method with: `self` as an object whose attribute kinds come from the
+    class (annotations, dataclass fields, class attributes, simple __init__ assignments).
+    Returns (kinds, None) or (None, reason)."""
+    from .compiler import attribute_uses, default_kinds, object_kind
+
+    params = [a.arg for a in node.args.args]
+    if not params:
+        return None, 'a method without self'
+    first = params[0]
+    uses = attribute_uses(node, [first]).get(first)
+    if uses is None:
+        return None, (
+            f'{first!r} is used as a whole (a method is called on it or it is passed on)\n'
+            f'  hint: make the helper a plain function that takes the values, like helper({first}.x)'
+        )
+    known = {}
+    for klass in reversed(cls.__mro__[:-1]):
+        for attr, value in vars(klass).items():
+            if not attr.startswith('__') and type(value) in (int, float, bool, str, bytes):
+                known[attr] = _annotation_kind(type(value))
+        try:
+            annotations = inspect.get_annotations(klass)  # also works with Python 3.14's lazy annotations
+        except Exception:
+            annotations = {}
+        for attr, annotation in annotations.items():
+            kind = _annotation_kind(annotation)
+            if kind:
+                known[attr] = kind
+        known.update(_init_kinds(klass))
+    missing = sorted(a for a in uses if a not in known)
+    if missing:
+        return None, (
+            f'types of {", ".join(f"{first}.{a}" for a in missing)} are not known from the class\n'
+            '  hint: annotate them in the class body (x: float) or use a dataclass; a real call compiles anyway'
+        )
+    try:
+        kinds = default_kinds(function)
+    except Exception as exc:
+        return None, str(exc)
+    kinds[first] = object_kind([(a, known[a]) for a in sorted(uses)])
+    return kinds, None
+
+
+def _targets(tree, namespace):
+    """(qualified name, ast node, function or None, class or None) for top-level functions and methods."""
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            value = namespace.get(node.name)
+            yield node.name, node, getattr(value, 'python', value), None
+        elif isinstance(node, ast.ClassDef):
+            cls = namespace.get(node.name)
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and not item.name.startswith('__'):
+                    raw = vars(cls).get(item.name) if isinstance(cls, type) else None
+                    if isinstance(raw, (staticmethod, classmethod)):
+                        continue
+                    yield f'{node.name}.{item.name}', item, getattr(raw, 'python', raw), cls
+
+
 def suggest(path):
-    """For each top-level function: does it compile, is it worth it, and what to do."""
+    """For each top-level function and method: does it compile, is it worth it, and what to do."""
     from .compiler import Compiler
 
     path = Path(path).resolve()
@@ -77,14 +178,10 @@ def suggest(path):
     tree = ast.parse(source)
     namespace = _load(path)
     rows = []
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef):
-            continue
+    for qualified, node, function, cls in _targets(tree, namespace):
         decorators = _decorator_names(node)
-        value = namespace.get(node.name)
-        function = getattr(value, 'python', value)
         row = {
-            'function': node.name,
+            'function': qualified,
             'line': node.lineno,
             'decorated': any(d in _DECORATORS for d in decorators),
             'other_decorators': [d for d in decorators if d not in _DECORATORS],
@@ -94,8 +191,11 @@ def suggest(path):
             'problem': None,
         }
         if inspect.isfunction(function):
+            kinds, why = method_kinds(cls, function, node) if cls is not None else (None, None)
             try:
-                compiler = Compiler(function)
+                if why is not None:
+                    raise ValueError(why)
+                compiler = Compiler(function, kinds=kinds)
                 compiler.generate()
                 row['compiles'] = True
                 row['return_type'] = compiler.return_type
@@ -138,9 +238,14 @@ def apply(path, write=False):
     tree = ast.parse(source)
     inserts = []  # (line index, text)
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in targets:
-            indent = re.match(r'\s*', lines[node.lineno - 1]).group(0)
-            inserts.append((node.lineno - 1, f'{indent}@optimize\n'))
+        nodes = [(node.name, node)] if isinstance(node, ast.FunctionDef) else []
+        if isinstance(node, ast.ClassDef):
+            nodes = [(f'{node.name}.{n.name}', n) for n in node.body if isinstance(n, ast.FunctionDef)]
+        for qualified, fn_node in nodes:
+            if qualified in targets:
+                first = fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno
+                indent = re.match(r'\s*', lines[first - 1]).group(0)
+                inserts.append((first - 1, f'{indent}@optimize\n'))
     imported = any(
         isinstance(n, ast.ImportFrom)
         and n.module == 'pyrust_engine'

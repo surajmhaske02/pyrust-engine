@@ -4,7 +4,7 @@ Run:  python -m pyrust_engine mcp      (or the `pyrust-mcp` command)
 
 Claude Code:  claude mcp add pyrust -- python -m pyrust_engine mcp
 
-Tools:
+Tools (functions and class methods):
   check_code    does this Python code compile to Rust? which line blocks it, and the hint
   suggest_file  which functions in a file to decorate (same as `suggest --json`)
   apply_file    add @optimize where it compiles; returns a diff, writes only if asked
@@ -26,7 +26,8 @@ import timeit
 import traceback
 from pathlib import Path
 
-PROTOCOL = '2025-06-18'
+PROTOCOL = '2025-11-25'  # newest version this server speaks
+SUPPORTED = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05')
 
 
 def _load_code(code):
@@ -41,7 +42,8 @@ def _load_code(code):
     return path, namespace
 
 
-def _functions(namespace, path, name=None):
+def _functions(namespace, path, name=None, methods=False):
+    """{name: function}; with methods=True also {"Class.method": (function, class)}."""
     import inspect
 
     found = {}
@@ -49,6 +51,11 @@ def _functions(namespace, path, name=None):
         fn = getattr(value, 'python', value)
         if inspect.isfunction(fn) and fn.__code__.co_filename == str(path):
             found[key] = fn
+        elif methods and isinstance(value, type) and getattr(value, '__module__', None) == '__pyrust_mcp__':
+            for attr, raw in vars(value).items():
+                raw = getattr(raw, 'python', raw)
+                if inspect.isfunction(raw) and not attr.startswith('__') and raw.__code__.co_filename == str(path):
+                    found[f'{key}.{attr}'] = (raw, value)
     if name is not None:
         if name not in found:
             raise ValueError(f'no function named {name!r} in the code (found: {", ".join(found) or "none"})')
@@ -62,10 +69,16 @@ def check_code(code, function=None):
 
     path, namespace = _load_code(code)
     results = []
-    for name, fn in _functions(namespace, path, function).items():
+    for name, fn in _functions(namespace, path, function, methods=True).items():
         row = {'function': name, 'compiles': False}
         try:
-            compiler = Compiler(fn)
+            kinds = None
+            if isinstance(fn, tuple):  # a method: self's attribute types come from the class
+                fn, cls = fn
+                kinds, why = _method_kinds(fn, cls)
+                if why is not None:
+                    raise ValueError(why)
+            compiler = Compiler(fn, kinds=kinds)
             compiler.generate()
             row.update(
                 compiles=True,
@@ -80,12 +93,29 @@ def check_code(code, function=None):
     return {'functions': results}
 
 
+def _method_kinds(fn, cls):
+    import ast
+    import inspect
+    import textwrap
+
+    from .advisor import method_kinds
+
+    node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+    return method_kinds(cls, fn, node)
+
+
 def rust_source(code, function):
     from .compiler import Compiler
 
     path, namespace = _load_code(code)
-    fn = _functions(namespace, path, function)[function]
-    return {'function': function, 'rust': Compiler(fn).generate()}
+    fn = _functions(namespace, path, function, methods=True)[function]
+    kinds = None
+    if isinstance(fn, tuple):
+        fn, cls = fn
+        kinds, why = _method_kinds(fn, cls)
+        if why is not None:
+            raise ValueError(why)
+    return {'function': function, 'rust': Compiler(fn, kinds=kinds).generate()}
 
 
 def benchmark(code, call):
@@ -194,12 +224,30 @@ TOOLS = {
 }
 
 
+# Tool hints for clients (MCP 2025-03-26 and later). Tools that load or run the given code
+# are not read-only: that code can do anything a script can.
+ANNOTATIONS = {
+    'check_code': {'title': 'Check code compiles', 'readOnlyHint': False, 'destructiveHint': False},
+    'suggest_file': {'title': 'Suggest @optimize for a file', 'readOnlyHint': False, 'destructiveHint': False},
+    'apply_file': {'title': 'Add @optimize to a file', 'readOnlyHint': False, 'destructiveHint': True},
+    'rust_source': {'title': 'Show generated Rust', 'readOnlyHint': False, 'destructiveHint': False},
+    'benchmark': {'title': 'Benchmark Python vs PyRust', 'readOnlyHint': False, 'destructiveHint': False},
+    'doctor': {'title': 'Check the Rust toolchain', 'readOnlyHint': True},
+}
+
+
 def _tool_list():
     return [
         {
             'name': name,
+            'title': ANNOTATIONS[name]['title'],
             'description': description,
             'inputSchema': {'type': 'object', 'properties': properties, 'required': required},
+            'annotations': {
+                **ANNOTATIONS[name],
+                'idempotentHint': name != 'benchmark',
+                'openWorldHint': False,
+            },
         }
         for name, (_, description, properties, required) in TOOLS.items()
     ]
@@ -216,7 +264,9 @@ def handle(message):
 
         params = message.get('params') or {}
         result = {
-            'protocolVersion': params.get('protocolVersion', PROTOCOL),
+            'protocolVersion': (
+                params.get('protocolVersion') if params.get('protocolVersion') in SUPPORTED else PROTOCOL
+            ),
             'capabilities': {'tools': {'listChanged': False}},
             'serverInfo': {'name': 'pyrust-engine', 'version': __version__},
             'instructions': 'Use check_code before adding @optimize; apply_file shows a diff unless write=true.',
@@ -233,7 +283,11 @@ def handle(message):
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 value = TOOLS[name][0](**(params.get('arguments') or {}))
-            result = {'content': [{'type': 'text', 'text': json.dumps(value, indent=2)}], 'isError': False}
+            result = {
+                'content': [{'type': 'text', 'text': json.dumps(value, indent=2)}],
+                'structuredContent': value,  # the same data as JSON (MCP 2025-06-18 and later)
+                'isError': False,
+            }
         except Exception as exc:
             text = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
             result = {'content': [{'type': 'text', 'text': text}], 'isError': True}

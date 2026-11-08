@@ -11,8 +11,8 @@ jobs:
         python: ['3.10', '3.12', '3.13', '3.14', '3.15']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
@@ -47,7 +47,7 @@ jobs:
       - name: Compare with the last release
         shell: bash
         run: python benchmarks/compare.py benchmarks/ci-results.json >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: results-${{ matrix.os }}-${{ matrix.python }}
           path: benchmarks/ci-results.json
@@ -58,12 +58,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.14t', '3.15t']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.14t'
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
       - uses: dtolnay/rust-toolchain@stable
       - run: python -c "import sys, sysconfig; print(sys.version); assert sysconfig.get_config_var('Py_GIL_DISABLED')"
       - run: python -m pip install ".[arrays]"
@@ -79,8 +81,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - run: python -m pip install ruff mypy
@@ -91,14 +93,14 @@ jobs:
   numba-comparison:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
       - run: python -m pip install ".[benchmark]"
       - run: python -m examples.benchmark_suite --output benchmarks/numba-comparison.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: numba-comparison
           path: benchmarks/numba-comparison.json
@@ -106,8 +108,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: python -m pip install build twine
@@ -118,7 +120,7 @@ jobs:
           python -m venv /tmp/clean
           /tmp/clean/bin/pip install dist/*.whl
           cd /tmp && /tmp/clean/bin/python -c "import pyrust_engine, pathlib; print(pyrust_engine.__version__); assert (pathlib.Path(pyrust_engine.__file__).parent / 'py.typed').exists()"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/

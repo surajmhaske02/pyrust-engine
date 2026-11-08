@@ -13,7 +13,7 @@ Put `@optimize` above a function. PyRust turns that function into Rust, compiles
 
 - ✍️ **Write plain Python.** No new language, no build step, no rewrite. Type annotations are optional.
 - ⚡ **Get real speed on CPU-heavy code:** arithmetic, `math` functions, bit operations, helper functions, recursion and NumPy arrays run about **6× to 110× faster** in our tests on Linux, macOS and Windows.
-- 🧰 **Use everyday Python:** lists, strings, dicts, sets, float32 embeddings, pandas columns (pandas 3 text columns too), polars Series and `random` compile too, with the same results as plain Python.
+- 🧰 **Use everyday Python:** lists, strings, dicts, sets, float32 embeddings, pandas columns (pandas 3 text columns too), polars Series, `random`, and methods that read and update `self.x` compile too, with the same results as plain Python.
 - 🐼 **Speed up small functions over whole columns** with `@vectorize`: a faster replacement for `df.apply`, `Series.map` and polars `map_elements` (about 20× faster on number columns, 3–4× on text columns).
 - 🤖 **Built for AI apps and agents:** ready-made `pyrust_engine.ai` (BM25 with add/remove/save/load, a drop-in `BM25Okapi` for `rank_bm25`, cosine, binary and int8 top-k with filters, chunking, metrics, batches), `suggest`/`apply` with JSON output, and an MCP server for coding assistants.
 - 🧶 **Ready for free-threaded Python 3.14t:** tested in CI, and PyRust never turns the GIL back on.
@@ -107,6 +107,25 @@ ids, scores = cosine_top_k(query_vec, embeddings, k=5)     # float32 embedding s
 hits = BM25(chunk_text(document, 800, 100)).search("fast python", k=3)
 ```
 
+Classes and methods (0.7.5):
+
+```python
+from dataclasses import dataclass
+from pyrust_engine import optimize
+
+@dataclass
+class Particle:
+    x: float
+    vx: float
+    steps: int = 0
+
+    @optimize
+    def advance(self, dt: float, n: int) -> None:   # 7.8–12× faster in CI
+        for _ in range(n):
+            self.x += self.vx * dt                  # attributes are written back after the call
+            self.steps += 1
+```
+
 New in 0.7.3:
 
 ```python
@@ -128,65 +147,66 @@ pl_df.with_columns(pl.col("email").map_batches(domain))   # polars
 
 For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file.py --write`, and `claude mcp add pyrust -- python -m pyrust_engine mcp`. See [AI and agents](https://surajmhaske02.github.io/pyrust-engine/ai/) and [`AGENTS.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/AGENTS.md).
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. 257 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t.
+> **Status: experimental.** Not a general Python compiler and not production-hardened. 261 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t and 3.15t.
 
 ## Comparison at a glance
 
-| | Plain Python | **PyRust 0.7** |
+| | Baseline | **PyRust 0.7.5** |
 |---|---|---|
-| Integer loop (500k) | 34.8 ms · 1× | **1.12 ms · 31×** |
-| Float recurrence (300k) | 21.4 ms · 1× | **1.56 ms · 14×** |
-| Array kernel, read (100k float64) | 10.3 ms · 1× | **0.122 ms · 85×** |
-| Write into an output array (100k) | 33.8 ms · 1× | **0.380 ms · 89×** |
-| Recursive `fib(25)` | 7.26 ms · 1× | **0.596 ms · 12×** |
-| `math.sqrt` / `sin` / `log` loop (300k) | 41.0 ms · 1× | **3.74 ms · 11×** |
-| Helper function called in a loop (300k) | 47.6 ms · 1× | **0.745 ms · 64×** |
-| Bit-mixing hash with `^ & << >> **` (300k) | 74.4 ms · 1× | **0.662 ms · 112×** |
-| Edit distance of two strings (288 chars each) · *0.7.1* | 11.2 ms · 1× | **0.758 ms · 15×** |
-| Monte Carlo with `random.random()` (200k) · *0.7.1* | 24.9 ms · 1× | **3.38 ms · 7.4×** |
-| Tiny function over 100k rows: `@vectorize` vs a Python loop · *0.7.1* | 13.4 ms · 1× | **0.653 ms · 20×** |
-| Variance of a Python list (100k floats, copy included) · *0.7.1* | 6.07 ms · 1× | **3.12 ms · 1.9×** |
-| Tokenize 1.1M characters (`ai.tokenize`) · *0.7.2* | 60.4 ms · 1× | **15.4 ms · 3.9×** |
-| Word count with a dict (160k words) · *0.7.2* | 22.9 ms · 1× | **13.3 ms · 1.7×** |
-| Edit distance of two 500-char strings (`ai.levenshtein`) · *0.7.2* | 53.0 ms · 1× | **3.09 ms · 17×** |
-| float32 dot product (100k, NumPy 2 rules) · *0.7.2* | 26.0 ms · 1× | **0.219 ms · 119×** |
-| BM25 query over 1,977 documents · *0.7.2* | 27.9 ms · 1× | **0.106 ms · 263×** |
-| Cosine top-10 over 50k×384 float32 vs **NumPy BLAS** · *0.7.2* | 20.2 ms (NumPy) | **22.1 ms · 0.9×** |
-| `BM25Okapi` query over 5,000 documents vs the **`rank_bm25`** package · *0.7.3* | 1.85 ms | **0.123 ms · 15×** (same scores) |
-| Binary-code top-10 over 200k × 384 bits vs **NumPy** · *0.7.3* | 12.6 ms (NumPy) | **3.70 ms · 3.4×** |
-| int8 top-10 over 100k × 384 vs **NumPy** (int32 copy + matmul) · *0.7.3* | 39.5 ms (NumPy) | **39.1 ms · 1.0×** (no 4× copy) |
-| `@vectorize` over a 200k-row text column vs pandas `Series.map` · *0.7.4* | 83.3 ms | **18.4 ms · 4.5×** |
-| `tokenize_many`, 2,000 documents, vs `tokenize` one by one (both compiled) · *0.7.4* | 242 ms | **147 ms · 1.65×** |
-| Native call of a tiny function (`native_loop_free=True`) · *0.7.4* | 0.046 µs (Python) | **0.18 µs** (0.7.3: 2.8 µs) |
-| A method updating `self.x`… over 20k steps · *0.7.5* | 2.12 ms | **0.176 ms · 12×** |
-| 1000 calls on a 32-element NumPy array · *0.7.5* | 3.91 ms | **0.44 ms · 8.9×** (direct calls with arrays) |
+| Integer loop (500k) | 43.1 ms · 1× | **1.19 ms · 36×** |
+| Float recurrence (300k) | 19.9 ms · 1× | **1.82 ms · 11.0×** |
+| Array kernel, read (100k float64) | 12.1 ms · 1× | **0.125 ms · 96×** |
+| Write into an output array (100k) | 42.6 ms · 1× | **0.435 ms · 98×** |
+| Recursive `fib(25)` | 9.70 ms · 1× | **0.736 ms · 13.2×** |
+| `math.sqrt` / `sin` / `log` loop (300k) | 49.2 ms · 1× | **5.11 ms · 9.6×** |
+| Helper function called in a loop (300k) | 56.4 ms · 1× | **0.840 ms · 67×** |
+| Bit-mixing hash with `^ & << >> **` (300k) | 90.7 ms · 1× | **0.748 ms · 121×** |
+| A method updating `self.x`, `self.vx`… (20k steps) | 2.12 ms · 1× | **0.176 ms · 12.1×** |
+| 1,000 calls on a 32-element NumPy array | 3.91 ms · 1× | **0.440 ms · 8.9×** |
+| Edit distance of two strings (288 chars each) | 13.7 ms · 1× | **0.937 ms · 14.6×** |
+| Monte Carlo with `random.random()` (200k) | 30.7 ms · 1× | **4.05 ms · 7.6×** |
+| Tiny function over 100k rows: `@vectorize` vs a Python loop | 19.1 ms · 1× | **0.737 ms · 26×** |
+| `@vectorize` over a 200k-row text column vs pandas `Series.map` | 96.5 ms (pandas) | **20.1 ms · 4.8×** |
+| Variance of a Python list (100k floats, copy included) | 7.39 ms · 1× | **3.88 ms · 1.91×** |
+| Tokenize 1.1M characters (`ai.tokenize`) | 60.9 ms · 1× | **20.9 ms · 2.9×** |
+| Word count with a dict (160k words) | 22.7 ms · 1× | **16.9 ms · 1.35×** |
+| Edit distance of two 500-char strings (`ai.levenshtein`) | 53.6 ms · 1× | **3.06 ms · 17.5×** |
+| float32 dot product (100k, NumPy 2 rules) | 24.9 ms · 1× | **0.214 ms · 117×** |
+| BM25 query over 1,977 documents | 26.2 ms · 1× | **0.052 ms · 508×** |
+| `BM25Okapi` query, 5,000 documents, vs the **`rank_bm25`** package | 1.98 ms (rank_bm25) | **0.068 ms · 29×** (same scores) |
+| Binary-code top-10 over 200k × 384 bits vs **NumPy** | 13.4 ms (NumPy) | **4.19 ms · 3.2×** |
+| int8 top-10 over 100k × 384 vs **NumPy** (int32 copy + matmul) | 39.3 ms (NumPy) | **40.0 ms · 0.98×** (no 4× copy) |
+| Cosine top-10 over 50k×384 float32 vs **NumPy BLAS** | 19.3 ms (NumPy) | **23.1 ms · 0.84×** |
+| JSON → array pipeline | 9.13 ms · 1× | **6.67 ms · 1.37×** |
+| Native call of a tiny function, per call | 0.059 µs (Python) | **0.25 µs** (0.7.3: 2.8 µs) |
 | Tiny `add(a, b)` per call | ≈1× | **≈1×** (runs as plain Python on purpose; use `@vectorize` for columns) |
-| JSON → array pipeline | 7.75 ms · 1× | **5.39 ms · 1.44×** |
 | Big integers / overflow / math errors | Exact | **Exact (replays in Python)** |
 | Unsupported code | Runs | **Runs in Python, with the line and a hint** |
 | Runtime dependencies | None | **None** (NumPy for arrays; Rust only to compile) |
 | First call (compile) | None | 0.1–0.5 s (about 0.005 s from the disk cache) |
 
-<sub>"time · speedup vs Python", measured by CI. Rows marked "vs NumPy" or "vs `rank_bm25`" compare with those libraries, not with plain Python. BM25 is compared with a straightforward pure-Python BM25 that scans the documents for each query; cosine top-k is compared with vectorized NumPy, which is already native code (PyRust is about even there). Runner: GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Shared CI machines are noisy; treat the numbers as approximate. Raw data: [`benchmarks/`](https://github.com/surajmhaske02/pyrust-engine/tree/main/benchmarks).</sub>
+<sub>"time · speedup", measured by CI for 0.7.5. Rows marked "vs NumPy" or "vs `rank_bm25`" compare with those libraries, not with plain Python. BM25 is compared with a straightforward pure-Python BM25 that scans the documents for each query; cosine top-k is compared with vectorized NumPy, which is already native code (PyRust is about even there). Runner: GitHub Actions `ubuntu-latest` runner (x86_64, Python 3.13, Rust 1.99). Shared CI machines are noisy; treat the numbers as approximate. Raw data: [`benchmarks/`](https://github.com/surajmhaske02/pyrust-engine/tree/main/benchmarks).</sub>
 
 ![Speedup versus plain Python](https://cdn.jsdelivr.net/gh/surajmhaske02/pyrust-engine@main/docs/benchmark-speedup.svg)
 
 ### Speed on every platform
 
-Speedup over plain Python, same CI run, Python 3.13 and Rust 1.99:
+Speedup over plain Python, same CI run (0.7.5), Python 3.13 and Rust 1.99:
 
 | Workload | Linux x86_64 | macOS Apple Silicon | Windows x86_64 |
 |---|---:|---:|---:|
-| Integer loop | 31× | 39× | 29× |
-| Float recurrence | 14× | 5.7× | 7.8× |
-| Array kernel (read) | 85× | 42× | 86× |
-| Write into an output array | 89× | 73× | 44× |
-| Recursive `fib(25)` | 12× | 13× | 12× |
-| `math` functions loop | 11× | 14× | 15× |
-| Helper function in a loop | 64× | 91× | 83× |
-| Bit-mixing hash | 112× | 72× | 104× |
-| Tiny `add(a, b)` (runs as Python) | ≈1× | ≈1× | ≈1× |
-| Native call of a tiny function, per call · *0.7.4* | 0.18 µs | 0.16 µs | 0.19 µs |
+| Integer loop | 36× | 53× | 36× |
+| Float recurrence | 11.0× | 7.4× | 9.2× |
+| Array kernel (read) | 96× | 81× | 97× |
+| Write into an output array | 98× | 78× | 63× |
+| Recursive `fib(25)` | 13.2× | 15.0× | 15.8× |
+| `math` functions loop | 9.6× | 13.7× | 15.0× |
+| Helper function in a loop | 67× | 110× | 65× |
+| Bit-mixing hash | 121× | 83× | 122× |
+| Method updating `self.x` | 12.1× | 7.8× | 10.0× |
+| 1,000 calls on a small array | 8.9× | 6.1× | 6.3× |
+| Text column vs pandas `map` | 4.8× | 4.2× | 3.8× |
+| Native call of a tiny function, per call | 0.25 µs | 0.18 µs | 0.25 µs |
 
 Float recurrences and `math`-heavy loops gain less because the floating-point work itself costs the same in both; PyRust removes the interpreter overhead around it. A comparison with Numba is on the [benchmarks page](https://surajmhaske02.github.io/pyrust-engine/benchmarks/).
 
@@ -227,23 +247,20 @@ Everything else (method calls on objects, `print`, `try`, float formatting, NumP
 | Objects and classes are dynamic | methods, dataclasses | ✅ since 0.7.5 `self.x` reads and assignments compile (numbers, str, NumPy arrays); ❌ method calls on objects, JSON documents |
 | I/O waits | network, disk, database | ❌ Not a CPU problem: use `asyncio` or threads |
 
-## Version comparison
+## Version history
 
-| | 0.5 | 0.6 | **0.7** |
-|---|---|---|---|
-| Values | `int`, `float`, `float64` arrays | + `int64` arrays | **+ `bool`, tuples, 2-D arrays, new arrays** |
-| Loops | `range`, `while` | same | **+ `for x in a`, `enumerate`, `prange` (multi-core)** |
-| Builtins | `abs min max int pow`, `math.*` | same | **+ `sum round divmod bool`, `atan2 copysign fmod`** |
-| Functions | helper calls | + recursion | **+ keyword/default arguments, helpers may write arrays** |
-| Argument types | from annotations | same | **compiled per type actually passed; annotations optional** |
-| Long calls | 10M-step budget, then slow replay | same | **no limit, background thread, Ctrl-C works** |
-| Array writes | — | full copy per call | **undo log (no copy for sparse writes)** |
-| Crashes in generated code | abort | abort | **caught, replayed in Python** |
-| Deployment | needs Rust | + `doctor`, clear toolchain errors | **+ `build` ahead of time: no Rust needed at run time** |
-| Developer tools | `explain()`, warnings, `check` | + type hints, API docs | **+ hints in messages, Jupyter magics, docs website** |
-| Tests / CI | 89 / 3 OSes × 3 Pythons | 128 | **150 / 3 OSes × Python 3.10–3.15, lint, coverage, benchmark tracking** |
+| Release | What it added |
+|---|---|
+| **0.7.6 (current)** | `suggest`/`apply` and the MCP server handle class methods; MCP 2025-11-25 (tool hints, structured results); free-threaded 3.15t in CI; refreshed docs and benchmarks |
+| 0.7.5 | Methods and objects: `self.x` reads and number assignments (dataclasses, `__slots__`, plain classes); direct calls with NumPy arrays, `str` and `bytes` |
+| 0.7.4 | CPython calls compiled functions directly (about 0.2 µs instead of 2–3 µs per call); text columns and text batches 2–4× faster |
+| 0.7.3 | pandas 3 text and polars columns, drop-in `BM25Okapi` for `rank_bm25`, index add/remove/save/load, binary and int8 search with filters, batches, free-threaded Python |
+| 0.7.2 | float32, string values, growable lists, dicts and sets, the `pyrust_engine.ai` library, `suggest`/`apply`, MCP server |
+| 0.7.1 | Lists, `str`/`bytes`, pandas Series, the `random` module, `@vectorize` |
+| 0.7.0 | bools, tuples, 2-D and new arrays, `prange`, per-type specialization, unlimited long calls with Ctrl-C, undo log for array writes, ahead-of-time `build`, Jupyter magics |
+| 0.5–0.6 | ints, floats, `float64`/`int64` arrays, `math`, helper calls, recursion, `doctor` |
 
-**0.7.1** added lists, `str`/`bytes`, pandas Series, the `random` module and `@vectorize`. **0.7.2** added float32, string values, growable lists, dicts and sets, the `pyrust_engine.ai` library, `suggest`/`apply` and an MCP server. **0.7.3** added pandas 3 text columns and polars, a drop-in `BM25Okapi` for `rank_bm25`, index add/remove/save/load, binary and int8 search with filters, batches on all cores, and free-threaded Python support. **0.7.4** let CPython call compiled functions directly (about 0.2 µs per call instead of 2–3 µs), and made text columns and text batches 2–4× faster. **0.7.5 (current)** compiles methods (`self.x` reads and assignments; dataclasses, `__slots__`) and extends direct calls to NumPy arrays, `str` and `bytes`. Older releases: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
+Details for every release: [Changelog](https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md).
 
 ## Install
 
@@ -402,7 +419,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Correctness evidence
 
-- **257 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t (3 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
+- **261 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t and 3.15t (6 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
 - **Edge cases** for every operation: NaN, ±0.0, ±inf, overflow, math domain errors, huge exponents and shifts, int/float comparisons around 2**53 and 2**63, writes that fail halfway, overlapping and read-only arrays, recursion depth, Ctrl-C on long calls, prebuilt libraries without Rust.
 - **Generated-program fuzzing:** random programs using the supported operators and `math` functions are compiled and compared with CPython on all three operating systems, including which exception is raised.
 - **Benchmark tracking:** every CI job compares its speedups with the last release and flags drops in the job summary.

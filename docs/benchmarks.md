@@ -85,21 +85,25 @@ Note: string- and dict-heavy rows (`dict_word_count`, `str_tokenize`) vary a lot
 
 ## Compared with Numba
 
-The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12. Speedup over plain Python in that run:
+The CI job `numba-comparison` runs the same workloads with Numba 0.68 (`fastmath=False`) on Linux, Python 3.12 (PyRust 0.7.5). Speedup over plain Python in that run:
 
-| Workload | PyRust 0.7 | Numba |
+| Workload | PyRust 0.7.5 | Numba |
 |---|---:|---:|
-| Integer loop | 28x | 53x |
-| Float recurrence | 8.0x | 8.0x |
-| Array kernel (read) | 62x | 164x |
-| `math` functions loop | 11x | 10x |
-| Helper function in a loop | 75x | fails: the helper isn't `@njit` |
-| Bit-mixing hash | 85x | 116x |
-| Recursive `fib(25)` | 10x | fails: recursion through a plain Python global |
-| Write into an output array | 58x | 823x |
-| Tiny `add(a, b)` | 1.0x | 0.25x (slower than Python) |
+| Integer loop | 28x | 35x |
+| Float recurrence | 9.5x | 9.5x |
+| Array kernel (read) | 84x | 113x |
+| `math` functions loop | 10x | 11x |
+| Helper function in a loop | 59x | fails: the helper isn't `@njit` |
+| Bit-mixing hash | 101x | 123x |
+| Recursive `fib(25)` | 13x | fails: recursion through a plain Python global |
+| Write into an output array | 89x | 635x |
+| Edit distance of two strings | **27x** | 9.2x |
+| Variance of a Python list | **1.7x** | 0.09x (slower than Python: list conversion) |
+| Tiny `add(a, b)` | 1.0x | 0.35x (slower than Python) |
 
-Numba is a mature LLVM JIT and is faster on simple numeric kernels, especially dense array writes. PyRust matches it on math-heavy and float code, runs code Numba rejects, and never changes results. The trade-offs:
+Raw data: [`benchmarks/numba-comparison-v0.7.5.json`](https://github.com/surajmhaske02/pyrust-engine/blob/main/benchmarks/numba-comparison-v0.7.5.json).
+
+Numba is a mature LLVM JIT and is faster on simple numeric kernels, especially dense array writes. PyRust matches it on math-heavy and float code, is faster on strings and Python lists, runs code Numba rejects (plain helpers, recursion, dicts, methods), and never changes results. The trade-offs:
 
 | | PyRust | Numba |
 |---|---|---|

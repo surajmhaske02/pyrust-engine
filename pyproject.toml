@@ -4,13 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrust-engine"
-version = "0.7.5"
-description = "Make Python code faster with one decorator: compiles numeric Python to Rust, with exact Python fallback"
+version = "0.7.6"
+description = "Make Python code faster with one decorator: compiles loops, strings, dicts, NumPy and methods to Rust, with exact Python fallback"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Compilers",
+    "Typing :: Typed",
+]
 keywords = ["performance", "rust", "compiler", "jit", "numpy", "pandas", "polars", "bm25", "rag", "llm", "mcp", "speed"]
 
 [project.scripts]
@@ -21,6 +43,7 @@ pyrust-mcp = "pyrust_engine.mcp:main"
 Homepage = "https://github.com/surajmhaske02/pyrust-engine"
 Documentation = "https://surajmhaske02.github.io/pyrust-engine/"
 Changelog = "https://github.com/surajmhaske02/pyrust-engine/blob/main/CHANGELOG.md"
+Issues = "https://github.com/surajmhaske02/pyrust-engine/issues"
 
 [tool.setuptools.packages.find]
 include = ["pyrust_engine*"]

@@ -58,7 +58,31 @@ print(collatz_steps.explain())
 
 The first call compiles the function (about 0.1–0.4 s, cached on disk afterwards). Later calls run natively.
 
-## 5. In Jupyter
+## 5. Methods work too
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Account:
+    balance: float
+    rate: float
+
+    @optimize
+    def grow(self, years: int) -> float:
+        for _ in range(years):
+            self.balance += self.balance * self.rate   # written back to the object after the call
+        return self.balance
+```
+
+## 6. Let the tools find what to speed up
+
+```bash
+python -m pyrust_engine suggest app.py          # which functions and methods compile, and what blocks the rest
+python -m pyrust_engine apply app.py --write    # add @optimize where it compiles and helps
+```
+
+## 7. In Jupyter
 
 ```python
 %load_ext pyrust_engine

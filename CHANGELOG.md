@@ -1,3 +1,27 @@
+# 0.7.6
+
+Tools catch up with classes, and everything you see first is current.
+
+**Tools**
+- `suggest`, `apply` and the MCP tools `check_code` / `rust_source` look at class methods
+  too. Attribute types come from the class (annotations, dataclass fields, class
+  attributes, simple `__init__` assignments); `apply` adds `@optimize` at the method's
+  indentation. Static and class methods are left alone.
+- MCP protocol 2025-11-25: version negotiation (2024-11-05 to 2025-11-25), tool titles and
+  hints (`readOnlyHint`, `destructiveHint`, ...), and `structuredContent` with every result.
+- `print()` used as a statement gets its own message and hint.
+
+**Project**
+- CI: current GitHub Actions (checkout v7, setup-python v7, upload-artifact v7, Pages v5;
+  Node 20 is deprecated), free-threaded Python 3.15t next to 3.14t.
+- PyPI metadata: an accurate description and classifiers (Python versions, operating
+  systems, free threading, typed).
+- README, docs home, Getting started and Examples: 0.7.5 benchmark numbers on all three
+  platforms, a new speed chart, a release table, class and direct-call examples, a current
+  Numba comparison (PyRust is faster on strings and Python lists).
+- Notebook: the "can't be sped up" demo used a list, which compiles since 0.7.1; it now
+  uses `print()`.
+
 # 0.7.5
 
 Classes, and direct calls for arrays and strings.

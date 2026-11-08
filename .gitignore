@@ -8,3 +8,4 @@ dist/
 *.dll
 *.dylib
 .cache/
+.vscode/

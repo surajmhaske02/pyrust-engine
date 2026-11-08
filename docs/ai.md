@@ -151,7 +151,7 @@ python -m pyrust_engine apply app/scoring.py              # diff that adds @opti
 python -m pyrust_engine apply app/scoring.py --write      # edit the file
 ```
 
-`suggest` reports for each function whether it compiles, whether it has a loop (if not, native code can't help), and the action to take. When something blocks compilation, it gives the line, the code and a rewrite hint. `apply` only decorates functions that compile and have a loop, adds the import, and never writes a file that doesn't parse.
+`suggest` reports for each function and class method whether it compiles, whether it has a loop (if not, native code can't help), and the action to take. When something blocks compilation, it gives the line, the code and a rewrite hint. `apply` only decorates functions that compile and have a loop, adds the import, and never writes a file that doesn't parse.
 
 ### MCP server
 
@@ -169,6 +169,8 @@ Other MCP clients use `python -m pyrust_engine mcp` (or `pyrust-mcp`) as a stdio
 | `rust_source` | the generated Rust for a function |
 | `benchmark` | plain Python vs PyRust time for one call, and whether the results match |
 | `doctor` | whether Rust is installed and working |
+
+`check_code` and `rust_source` also check class methods (`Particle.advance`), with attribute types taken from the class. The server speaks MCP 2025-11-25: each tool has a title and hints (`apply_file` is marked as changing files; tools that run the given code are not marked read-only), and every result also comes as `structuredContent`.
 
 `check_code`, `rust_source` and `benchmark` execute the code they are given, so use the server on trusted code.
 

@@ -184,6 +184,56 @@ def moving_average(values: list[float], window: int) -> list[float]:
     return out
 ```
 
+## Simulation with a class (methods and `self.x`)
+
+```python
+from dataclasses import dataclass
+from pyrust_engine import optimize
+
+@dataclass
+class Body:
+    x: float
+    y: float
+    vx: float
+    vy: float
+
+    @optimize
+    def advance(self, dt: float, n: int) -> None:
+        for _ in range(n):
+            self.x += self.vx * dt
+            self.y += self.vy * dt
+            if self.y < 0.0:            # bounce on the floor
+                self.vy = -self.vy
+                self.y = -self.y
+
+b = Body(0.0, 1.0, 0.5, -2.0)
+b.advance(0.001, 1_000_000)               # b.x, b.y, b.vy updated, exactly as in Python
+```
+
+Each attribute the method uses is read once before the call and the changed ones are written back after it succeeds. Calling another method (`self.helper()`) runs as Python; make the helper a plain function that takes the numbers.
+
+## Fast small calls on arrays and strings
+
+```python
+@optimize
+def norm(v) -> float:                     # called many times on small NumPy arrays
+    t = 0.0
+    for x in v:
+        t += x * x
+    return t ** 0.5
+
+@optimize
+def is_valid_code(code: str) -> bool:     # called for every row of a file
+    if len(code) != 8:
+        return False
+    for ch in code:
+        if not (ch.isdigit() or ch.isupper()):
+            return False
+    return True
+```
+
+CPython calls these directly (no `ctypes`), so each call costs well under a microsecond plus the work itself.
+
 ## pandas: replace `df.apply` with `vectorize`
 
 ```python
