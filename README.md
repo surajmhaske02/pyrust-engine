@@ -148,7 +148,7 @@ pl_df.with_columns(pl.col("email").map_batches(domain))   # polars
 
 For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file.py --write`, and `claude mcp add pyrust -- python -m pyrust_engine mcp`. See [AI and agents](https://surajmhaske02.github.io/pyrust-engine/ai/) and [`AGENTS.md`](https://github.com/surajmhaske02/pyrust-engine/blob/main/AGENTS.md).
 
-> **Status: experimental.** Not a general Python compiler and not production-hardened. 261 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t and 3.15t.
+> **Status: experimental.** Not a general Python compiler and not production-hardened. 272 tests pass in CI on Linux, macOS and Windows with Python 3.10 to 3.15, and on free-threaded Python 3.14t and 3.15t.
 
 ## Comparison at a glance
 
@@ -168,7 +168,7 @@ For coding agents: `python -m pyrust_engine suggest file.py --json`, `apply file
 | Monte Carlo with `random.random()` (200k) | 30.7 ms · 1× | **4.05 ms · 7.6×** |
 | Tiny function over 100k rows: `@vectorize` vs a Python loop | 19.1 ms · 1× | **0.737 ms · 26×** |
 | `@vectorize` over a 200k-row text column vs pandas `Series.map` | 96.5 ms (pandas) | **20.1 ms · 4.8×** |
-| Variance of a Python list (100k floats, copy included) | 7.39 ms · 1× | **3.88 ms · 1.91×** |
+| Variance of a Python list (100k floats, copy included) | 7.51 ms · 1× | **0.950 ms · 7.9×** (0.7.7: lists read directly) |
 | Tokenize 1.1M characters (`ai.tokenize`) | 60.9 ms · 1× | **20.9 ms · 2.9×** |
 | Word count with a dict (160k words) | 22.7 ms · 1× | **16.9 ms · 1.35×** |
 | Edit distance of two 500-char strings (`ai.levenshtein`) | 53.6 ms · 1× | **3.06 ms · 17.5×** |
@@ -405,7 +405,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 ## Limitations
 
 - **A subset of Python.** Methods compile through attribute reads, number assignments (`self.x += 1`) and calls to other plain methods; static/class methods and properties, closures, generators, `with`, float formatting, column slices or `print` in compiled code run as Python. Code inside `try` is fast only while it doesn't raise: an exception replays the whole call in Python.
-- **Containers hold one type** (a list of floats, a dict of str to int, ...). Lists, dicts and sets passed in are copied: lists of numbers are written back, lists of strings, dicts and sets are read-only. For simple work on big lists the copy dominates (variance of 100k floats: 1.9×); NumPy arrays avoid it. Looping over a set isn't compiled (no reproducible order); `sorted(s)` is.
+- **Containers hold one type** (a list of floats, a dict of str to int, ...). Lists, dicts and sets passed in are copied: lists of numbers are written back, lists of strings, dicts and sets are read-only. For simple work on big lists the copy still costs something (variance of 100k floats: 4–8×, NumPy arrays: much more). Looping over a set isn't compiled (no reproducible order); `sorted(s)` is.
 - **Strings:** `lower`/`upper`/`is...` are native for ASCII; other characters replay in Python (same result, slower).
 - **float32** needs NumPy 2; mixing float32 with values from float64 arrays runs as Python.
 - **`random`:** only the shared generator's functions listed above; not inside `prange`, and don't draw random numbers from another thread during a compiled call.
@@ -422,7 +422,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Correctness evidence
 
-- **261 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t and 3.15t (6 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
+- **272 automated tests**, passing on Linux, macOS and Windows with Python 3.10, 3.12, 3.13, 3.14 and 3.15 (15 CI jobs) and free-threaded Python 3.14t and 3.15t (6 jobs), plus lint (ruff), type checks (mypy) and a package build check on every push.
 - **Edge cases** for every operation: NaN, ±0.0, ±inf, overflow, math domain errors, huge exponents and shifts, int/float comparisons around 2**53 and 2**63, writes that fail halfway, overlapping and read-only arrays, recursion depth, Ctrl-C on long calls, prebuilt libraries without Rust.
 - **Generated-program fuzzing:** random programs using the supported operators and `math` functions are compiled and compared with CPython on all three operating systems, including which exception is raised.
 - **Benchmark tracking:** every CI job compares its speedups with the last release and flags drops in the job summary.

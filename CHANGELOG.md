@@ -27,7 +27,10 @@ dtypes, faster calls with lists, and a way to see what runs natively in producti
 **Faster calls**
 - The direct CPython entry point now reads `list[float]` / `list[int]` arguments (and
   copies written lists back) and builds `str` and list-of-number results itself.
-- DIRECT_NUMBERS
+- Variance of a 100,000-float Python list: 7.9x faster than plain Python on Linux (was
+  1.9x in 0.7.5), 5.8x on macOS, 4.3x on Windows (CI, Python 3.13).
+
+272 tests pass on Linux, macOS and Windows (Python 3.10–3.15) and free-threaded 3.14t/3.15t.
 
 **Production**
 - `pyrust_engine.stats()`, `print_stats()`, `reset_stats()`: calls, native calls, Python
