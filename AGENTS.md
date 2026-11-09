@@ -44,16 +44,17 @@ This file is for AI coding assistants (Claude Code, Cursor, Copilot, Codex and o
 | Instead of | Write |
 |---|---|
 | `print(...)` / logging in the loop | return the value; log outside |
-| `try/except` in the hot loop | let errors propagate (they replay in Python) |
+| `try/except` that fires on most iterations | check the condition first (`if x != 0:`); `try` is compiled and fast while nothing raises |
 | `b = a` (aliasing a list or dict) | `b = list(a)` / `dict(a)`, or keep using `a` |
 | looping over a set | `for x in sorted(s)` |
 | `d.get(k)` without a default | `d.get(k, 0)` |
 | float keys in a dict | int or str keys |
-| `self.helper()` inside a compiled method | a plain helper function that takes the values (`helper(self.x)`) |
+| `@staticmethod` helpers called on `self` | a plain method or a module-level function |
 | attributes holding lists, dicts or objects | NumPy arrays or plain numbers as attributes, or pass them in |
 | `df.apply(f, axis=1)`, `s.map(f)`, polars `map_elements(f)` | `@vectorize` on `f`, called with the columns (polars: `map_batches`) |
 | `'x' in series`, `series + series` on a str Series | `series.tolist()` first (Series operators work element by element) |
-| NumPy slices `a[1:]` in a loop | index loops `for i in range(1, len(a))` |
+| column slices `m[:, j]`, slices with a step | index loops `for i in range(...)` (`a[lo:hi]` and `m[i, :]` compile) |
+| arithmetic on `uint8`/`int32` array values (`img[i] + 1`) | `int(img[i]) + 1` |
 | float32 mixed with `np.float64` values | `float(x)` to compute in float64 |
 | `f"{x:.2f}"` (float formatting) | format outside the compiled function |
 

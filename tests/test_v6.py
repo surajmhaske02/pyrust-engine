@@ -201,8 +201,9 @@ class ArrayWrites(unittest.TestCase):
     def test_wrong_dtype_falls_back(self):
         import numpy as np
         fn = optimize(k.int_sum, warn_on_fallback=False)
-        self.assertEqual(fn(np.arange(5, dtype=np.int32)), 10)
+        self.assertEqual(fn(np.arange(5, dtype=np.int16)), 10)  # int16 is not compiled (0.7.7: int32 is)
         self.assertIn('int64', fn.report()['reason'])
+        self.assertEqual(fn(np.arange(5, dtype=np.int32)), 10)
 
 
 @unittest.skipUnless(RUST, 'rustc required')

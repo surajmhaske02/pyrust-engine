@@ -4,7 +4,9 @@
 
 Key facts for assistants:
 
-- **Methods work:** `self.x` reads and `self.x += ...` assignments of numbers compile (dataclasses, `__slots__`, plain classes); state is written back only after success.
+- **Methods work:** `self.x` reads, `self.x += ...` assignments of numbers and calls to other methods (`self.helper()`) compile (dataclasses, `__slots__`, plain classes); state is written back only after success.
+- **`try`/`except`, `raise`, `assert` compile;** an exception replays the call in Python. **NumPy views** `a[lo:hi]`, `m[i, :]` and `int32`/`uint8`/`bool` arrays compile.
+- **Production:** `pyrust_engine.print_stats()` shows which functions fall back to Python and why; `on_fallback()` hooks; logger `pyrust_engine`.
 - **Use `@optimize` on functions with loops:** arithmetic, `math`, `random`, NumPy arrays (`float64`/`int64`/`float32`), lists, strings, dicts, sets, pandas columns (pandas 3 `str` too) and polars Series.
 - **Use `@vectorize` for a one-row function over whole columns.** It is about 20x faster than `df.apply`/`Series.map` on number and bool columns and 3–4x on text columns (polars `map_elements` too).
 - **Check before decorating:** `python -m pyrust_engine suggest file.py --json`, or the MCP tool `check_code`. `apply file.py --write` adds the decorator automatically.

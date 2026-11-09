@@ -1,4 +1,4 @@
-# PyRust Engine API reference (0.7.5)
+# PyRust Engine API reference (0.7.7)
 
 Everything public is importable from `pyrust_engine`:
 
@@ -108,10 +108,11 @@ A function is compiled once per combination of argument types it is actually cal
 | pandas `Series` of str (pandas 3 `str` or `object`), no missing values, index `0..n-1` | read-only list of str; only `s[i]`, `len`, loops, `sorted/list/set/min/max/join` | |
 | polars `Series` without nulls: floats, ints up to `Int64`/`UInt32`, `String` | read-only; values as Python reads them | |
 | NumPy `float32` 1-D / 2-D (NumPy 2) | array, NumPy 2 promotion rules | `F32Array` / `F32Array2` |
+| NumPy `int32` / `uint8` / `bool` 1-D / 2-D | values can be compared, tested, converted, stored | |
 | `list` of `str` | read-only, copied in | `list[str]` |
 | `dict` with str/int keys and int/float/bool/str values | read-only, copied in | `dict[str, int]`, ... |
 | `set` / `frozenset` of str or int | read-only, copied in | `set[str]`, `frozenset[int]` |
-| any object used only as `obj.x` (incl. `self`) | each attribute read before the call; assigned int/float attributes written back after success | |
+| any object used only as `obj.x` and `obj.method()` (incl. `self`) | each attribute the call chain uses is read before the call; assigned int/float attributes written back after success | |
 
 Return values: one scalar type (including `np.float32`), a string, a tuple of scalars, a new NumPy array, a list (of floats, ints or strings), a dict or a set created in the function, or `None`. Recursive functions need a return annotation (`-> int`, `-> float`, `-> bool`).
 
@@ -169,6 +170,17 @@ When Rust is missing or broken, `check_rust()` returns `ok: False`, a one-line `
 | macOS developer tools missing | `xcode-select --install` |
 | Windows `link.exe` missing | Visual Studio Build Tools with C++ |
 | Linux `cc` missing | `sudo apt install build-essential` |
+
+## Statistics and logging
+
+| Function | What it does |
+|---|---|
+| `stats()` | one dict per `@optimize` function used: `function`, `calls`, `native_calls`, `fallback_calls`, `fallback_rate`, `backend`, `dispatch`, `compile_seconds`, `top_reasons` |
+| `print_stats(file=None)` | the same as a table |
+| `reset_stats()` | sets every function's call counters back to zero |
+| `on_fallback(callback)` | calls `callback(function_name, reason)` each time a call runs as plain Python; returns a function that removes it |
+
+Logging: the `pyrust_engine` logger writes one INFO line per new fallback reason and per compile, and a DEBUG line for every fallback.
 
 ## `pyrust_engine.ai`
 

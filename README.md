@@ -18,6 +18,7 @@ Put `@optimize` above a function. PyRust turns that function into Rust, compiles
 - 🤖 **Built for AI apps and agents:** ready-made `pyrust_engine.ai` (BM25 with add/remove/save/load, a drop-in `BM25Okapi` for `rank_bm25`, cosine, binary and int8 top-k with filters, chunking, metrics, batches), `suggest`/`apply` with JSON output, and an MCP server for coding assistants.
 - 🧶 **Ready for free-threaded Python 3.14t:** tested in CI, and PyRust never turns the GIL back on.
 - 🧵 **Use every CPU core** with `prange()` for loops whose iterations are independent.
+- 📊 **See what runs natively:** `pyrust_engine.print_stats()`, `on_fallback()` hooks and logging for production.
 - 🛟 **Never get a wrong answer.** Big integers, math errors, Ctrl-C and anything unsupported fall back to normal Python with the exact same result or exception.
 - 🔍 **See what's happening.** `fn.explain()` and a one-time warning say which line can't be sped up, why, and how to rewrite it.
 
@@ -224,11 +225,12 @@ Float recurrences and `math`-heavy loops gain less because the floating-point wo
 | **`random`** | `random uniform randint randrange gauss choice`, exactly Python's sequence |
 | **pandas / polars** | Series of numbers or str: `s[i]`, `s.iloc[i]`, `len(s)`, `for x in s`; `@vectorize` over whole columns (numbers, bools, str) |
 | **`math`** | `sqrt exp log log2 log10 sin cos tan asin acos atan atan2 sinh cosh tanh fabs copysign fmod floor ceil trunc isnan isinf isfinite pi e tau inf nan` |
-| **Arrays** | `a[i]`, `a[i, j]`, `a.shape`, `len(a)`, `for x in a`, writes (`a[i] = v`, `+=`), new arrays with `np.zeros/empty/ones(_like)` that can be returned |
-| **Classes** | methods and functions reading `obj.x` and assigning number attributes (`self.x += v`); dataclasses, `__slots__`, class attributes |
+| **Arrays** | `a[i]`, `a[i, j]`, `a.shape`, `len(a)`, `for x in a`, writes (`a[i] = v`, `+=`), new arrays with `np.zeros/empty/ones(_like)` that can be returned, read-only views `a[lo:hi]` and `m[i, :]`, `int32`/`uint8`/`bool` arrays, `np.sqrt/floor/ceil/abs/square/isnan` |
+| **Classes** | methods and functions reading `obj.x` and assigning number attributes (`self.x += v`), methods calling methods (`self.helper()`); dataclasses, `__slots__`, class attributes |
+| **Exceptions** | `try`/`except`/`else`/`finally`, `raise`, `assert` (an exception replays the call in Python, which handles it exactly) |
 | **Functions** | calls to your own functions (keyword and default arguments, recursion with a `-> int`/`-> float` annotation), module-level constants |
 
-Everything else (method calls on objects, `print`, `try`, float formatting, NumPy slices, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
+Everything else (`print`, `with`, float formatting, closures, column slices, …) still runs, as plain Python, and `explain()` gives a hint. Full details: [Guide](https://surajmhaske02.github.io/pyrust-engine/guide/).
 
 ## What makes Python slow, and what PyRust does about it
 
@@ -251,7 +253,8 @@ Everything else (method calls on objects, `print`, `try`, float formatting, NumP
 
 | Release | What it added |
 |---|---|
-| **0.7.6 (current)** | `suggest`/`apply` and the MCP server handle class methods; MCP 2025-11-25 (tool hints, structured results); free-threaded 3.15t in CI; refreshed docs and benchmarks |
+| **0.7.7 (current)** | Methods calling methods, `try`/`except`/`raise`/`assert`, NumPy views and `int32`/`uint8`/`bool` arrays, `np.sqrt` and friends, direct calls with lists and `str`/list results, `stats()` and logging |
+| 0.7.6 | `suggest`/`apply` and the MCP server handle class methods; MCP 2025-11-25 (tool hints, structured results); free-threaded 3.15t in CI; refreshed docs and benchmarks |
 | 0.7.5 | Methods and objects: `self.x` reads and number assignments (dataclasses, `__slots__`, plain classes); direct calls with NumPy arrays, `str` and `bytes` |
 | 0.7.4 | CPython calls compiled functions directly (about 0.2 µs instead of 2–3 µs per call); text columns and text batches 2–4× faster |
 | 0.7.3 | pandas 3 text and polars columns, drop-in `BM25Okapi` for `rank_bm25`, index add/remove/save/load, binary and int8 search with filters, batches, free-threaded Python |
@@ -401,7 +404,7 @@ Most "make Python fast" tools ask you to give something up: a new interpreter, a
 
 ## Limitations
 
-- **A subset of Python.** Methods compile only through attribute reads and number assignments (`self.x`, `self.x += 1`); calling methods on objects, closures, generators, `try`/`with`, float formatting, NumPy slices or `print` in compiled code (they run as Python).
+- **A subset of Python.** Methods compile through attribute reads, number assignments (`self.x += 1`) and calls to other plain methods; static/class methods and properties, closures, generators, `with`, float formatting, column slices or `print` in compiled code run as Python. Code inside `try` is fast only while it doesn't raise: an exception replays the whole call in Python.
 - **Containers hold one type** (a list of floats, a dict of str to int, ...). Lists, dicts and sets passed in are copied: lists of numbers are written back, lists of strings, dicts and sets are read-only. For simple work on big lists the copy dominates (variance of 100k floats: 1.9×); NumPy arrays avoid it. Looping over a set isn't compiled (no reproducible order); `sorted(s)` is.
 - **Strings:** `lower`/`upper`/`is...` are native for ASCII; other characters replay in Python (same result, slower).
 - **float32** needs NumPy 2; mixing float32 with values from float64 arrays runs as Python.
@@ -462,8 +465,8 @@ docs/            documentation website (MkDocs), API.md, benchmark chart
 ## Roadmap
 
 1. **Direct calls for more types:** lists, dicts, objects and returned strings or arrays still go through `ctypes` (1–3 µs).
-2. **More of classes:** calling other methods (`self.helper()`), lists and objects as attributes.
-3. **More array types:** `int32`, `uint8`, `bool` arrays in `@optimize`, 3-D arrays and slices like `a[i, :]`.
+2. **More of classes:** objects inside objects (`self.pos.x`), lists of objects, assigning new lists to attributes.
+3. **More arrays:** arithmetic on `int32`/`uint8` values with NumPy's wrap-around rules, 3-D arrays, column slices `m[:, j]`.
 4. **LSH buckets for `minhash`** (near-duplicates in near-linear time), MMR and rank fusion helpers.
 5. **Faster dense array writes** (an optimised path for functions that fill whole arrays).
 6. **Benchmarks on ARM Linux**, and against Cython and PyPy.

@@ -1,3 +1,39 @@
+# 0.7.7
+
+More real code compiles: methods calling methods, `try`/`except`, NumPy slices and more
+dtypes, faster calls with lists, and a way to see what runs natively in production.
+
+**Methods calling methods**
+- `self.helper(...)` compiles when `helper` is a plain method of the object's class
+  (base classes and subclass overrides are found like Python finds them). The runtime
+  collects the attributes the whole call chain uses; each call checks that the method is
+  unchanged and not hidden by an instance attribute. Recursive methods work with a return
+  annotation.
+- Lists, dicts and sets stored on objects can be read; list elements can be written.
+- `suggest`/`apply` see methods that call methods.
+
+**Exceptions**
+- `try`/`except`/`else`/`finally`, `raise` and `assert` compile. An exception replays the
+  call in Python, which runs the matching `except` exactly; fast when exceptions are rare.
+
+**NumPy**
+- Read-only views: `a[lo:hi]` on 1-D arrays and rows `m[i]` / `m[i, :]`, including
+  `for x in a[1:]`.
+- `int32`, `uint8` and `bool` arrays: compare, test, convert and store their values (with
+  NumPy's out-of-range errors); arithmetic on the values runs as Python (NumPy wraps).
+- `np.sqrt`, `np.floor`, `np.ceil`, `np.trunc`, `np.abs`, `np.square`, `np.isnan`,
+  `np.isinf`, `np.isfinite`, and `np.pi`, `np.e`, `np.inf`, `np.nan`.
+
+**Faster calls**
+- The direct CPython entry point now reads `list[float]` / `list[int]` arguments (and
+  copies written lists back) and builds `str` and list-of-number results itself.
+- DIRECT_NUMBERS
+
+**Production**
+- `pyrust_engine.stats()`, `print_stats()`, `reset_stats()`: calls, native calls, Python
+  calls and the top reasons per function. `on_fallback(callback)` for metrics and alerts.
+  Fallbacks and compiles are logged under the `pyrust_engine` logger.
+
 # 0.7.6
 
 Tools catch up with classes, and everything you see first is current.

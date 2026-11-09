@@ -49,6 +49,34 @@ def outer(a, b):
 
 Writes go straight into your array, with an undo log: if the call fails halfway, the writes are undone and the call replays in Python, so you see exactly what plain Python would do.
 
+### Slices, rows and more dtypes (0.7.7)
+
+```python
+@optimize
+def moving_max(a, w: int) -> float:
+    best = 0.0
+    for i in range(len(a) - w + 1):
+        window = a[i : i + w]          # a read-only view, no copy (like NumPy)
+        best = max(best, sum(window))
+    return best
+
+@optimize
+def threshold(img, out, level: int) -> int:   # img, out: uint8 arrays
+    count = 0
+    for i in range(img.shape[0]):
+        for j in range(img.shape[1]):
+            if img[i, j] > level:
+                out[i, j] = 255
+                count += 1
+            else:
+                out[i, j] = 0
+    return count
+```
+
+- `a[lo:hi]` on 1-D float64/int64/float32 arrays and `m[i]` / `m[i, :]` rows of 2-D arrays are views: read them, loop over them, pass them to helpers. Writing through a view, steps and columns (`m[:, j]`) are not compiled.
+- `int32`, `uint8` and `bool` arrays (1-D and 2-D): their values can be compared, tested in `if`, converted with `int()`, `float()`, `bool()` and stored. Storing an int that doesn't fit raises `OverflowError` exactly like NumPy. Arithmetic on the values themselves (`img[i] + 1`) runs as Python, because NumPy wraps around on overflow; write `int(img[i]) + 1`.
+- `np.sqrt`, `np.floor`, `np.ceil`, `np.trunc`, `np.abs`, `np.square`, `np.isnan`, `np.isinf`, `np.isfinite` on single numbers, and `np.pi`, `np.e`, `np.inf`, `np.nan`. Only functions whose result matches NumPy exactly are compiled (`np.exp`, `np.log`, `np.sin` may differ in the last digit, so use `math.exp`, which matches CPython). NumPy's warnings (square root of a negative number, overflow) replay in Python, so they still appear.
+
 ## float32
 
 ```python
@@ -303,8 +331,47 @@ Each attribute the method uses is read before the call and passed to the native 
 Instance attributes, class attributes (`rate = 0.01` in the class body), `__slots__` and dataclasses all work. These run as Python, with the same result:
 
 - properties and other descriptors, custom `__getattribute__` or `__setattr__`, frozen dataclasses (assigning raises `FrozenInstanceError` exactly as in Python);
-- calling a method on the object (`self.helper()`), passing the object on, comparing it, `del self.x`: `explain()` suggests making the helper a plain function that takes the values;
+- passing the object on, comparing it, `del self.x`, static and class methods called on it: `explain()` suggests a rewrite;
 - the same object passed twice when attributes are assigned.
+
+### Methods calling methods (0.7.7)
+
+```python
+@dataclass
+class Body:
+    x: float
+    vx: float
+    hits: int = 0
+
+    def bounce(self):
+        if self.x < 0.0:
+            self.x, self.vx = -self.x, -self.vx
+            self.hits += 1
+
+    @optimize
+    def advance(self, dt: float, n: int) -> None:
+        for _ in range(n):
+            self.x += self.vx * dt
+            self.bounce()                    # compiled together with advance()
+```
+
+`self.helper(...)` compiles when `helper` is a plain method of the object's class (found the way Python finds it, including base classes and overrides in subclasses). The runtime collects every attribute the whole call chain reads or assigns, and checks on each call that the method on the class is still the same function and that no instance attribute hides it; otherwise the call runs as Python. Recursive methods need a return annotation (`-> int`). Lists, dicts and sets stored on the object can be read (and list elements written); assigning a new list to the attribute runs as Python.
+
+## Exceptions: try, raise, assert
+
+```python
+@optimize
+def parse_all(texts: list[str]) -> int:
+    total = 0
+    for s in texts:
+        try:
+            total += int(s)
+        except ValueError:
+            total -= 1
+    return total
+```
+
+`try` bodies (with `else` and `finally`), `raise` and `assert` compile. When something inside would raise (an exception in the `try` body, a `raise`, a failed `assert`), the native call stops, undoes its array writes, and the whole call replays in Python, which runs the right `except` block and raises exactly the same exception. So results are always Python's, and the code is fast when exceptions are rare; a loop that hits its `except` on most calls is faster as plain Python. `return`/`break`/`continue` inside `try ... finally` is not compiled.
 
 ## Web apps and threads
 
@@ -326,7 +393,21 @@ Several threads can run compiled functions at the same time on different cores. 
 
 **Free-threaded Python (3.14t).** On the free-threaded build there is no GIL at all, so the Python code between compiled calls runs in parallel too. PyRust loads no C extension, so it never turns the GIL back on; CI runs the full test suite on 3.14t and checks that the GIL stays off. `python -m pyrust_engine doctor` says which build you are on. `pyrust_engine.ai.batch(fn, items)` runs any function over many items on a thread pool.
 
-**Call cost.** A function whose arguments are numbers, NumPy arrays, `str` or `bytes` and whose result is a number, bool or `None` is called by CPython directly: a C-level entry point checks the argument types (exact `int`/`float`/`bool`/`str`/`bytes`/`numpy.ndarray`, dtype, C order, alignment, writability, no overlapping writes), the function's code and every global it uses, runs the native code without the GIL, and builds the result, in about 0.2 µs for numbers and 0.3–0.5 µs with arrays or strings (since 0.7.4 for numbers, 0.7.5 for arrays and strings). Anything else takes the normal path, so results never change. `fn.report()['dispatch']` is `'direct'` when this is in use; `PYRUST_DIRECT_CALLS=0` turns it off. Lists, dicts, objects and returned strings or arrays cost 1–3 µs per call. Functions without a loop still run as plain Python by default (a Python call costs about 0.05 µs).
+**Call cost.** A function whose arguments are numbers, NumPy arrays, `str` or `bytes` and whose result is a number, bool or `None` is called by CPython directly: a C-level entry point checks the argument types (exact `int`/`float`/`bool`/`str`/`bytes`/`numpy.ndarray`, dtype, C order, alignment, writability, no overlapping writes), the function's code and every global it uses, runs the native code without the GIL, and builds the result, in about 0.2 µs for numbers and 0.3–0.5 µs with arrays or strings (since 0.7.4 for numbers, 0.7.5 for arrays and strings). Anything else takes the normal path, so results never change. `fn.report()['dispatch']` is `'direct'` when this is in use; `PYRUST_DIRECT_CALLS=0` turns it off. Since 0.7.7 lists of floats or ints are read the same way (and copied back when written), and `str` and list-of-number results are built directly. Dicts, sets, lists of strings, objects and returned arrays cost 1–3 µs per call. Functions without a loop still run as plain Python by default (a Python call costs about 0.05 µs).
+
+## Seeing what runs natively in production
+
+```python
+import logging, pyrust_engine
+
+logging.getLogger("pyrust_engine").setLevel(logging.INFO)   # one line per new fallback reason and per compile
+pyrust_engine.on_fallback(lambda name, reason: metrics.increment("pyrust.fallback", tags=[name]))
+
+pyrust_engine.print_stats()       # calls, native calls, Python calls and the top reasons, per function
+rows = pyrust_engine.stats()      # the same as a list of dicts (for dashboards); reset_stats() starts over
+```
+
+A function that quietly runs as plain Python is still correct, just slower. `stats()` shows which ones do and why, so you can fix them (or check them in a test).
 
 ## Parallel loops
 
@@ -347,7 +428,7 @@ Rules that keep results identical to Python: each iteration writes only its own 
 
 ## What runs as Python
 
-Classes and methods, closures, lambdas, generators, `try`/`with`, `print()`, float formatting, NumPy slices (they are views), mixed-type lists/dicts, float dict keys, loops over sets, global mutable `set`/`dict`/`list`, `round(x, ndigits)`, `math.hypot`, `numpy.random`. Each comes with a hint in `explain()`, or use `python -m pyrust_engine suggest file.py`.
+Static/class methods and properties used in compiled code, closures, lambdas, generators, `with`, `print()`, float formatting, NumPy slices other than `a[lo:hi]` and `m[i, :]`, arithmetic on int32/uint8/bool array values, mixed-type lists/dicts, float dict keys, loops over sets, global mutable `set`/`dict`/`list`, `round(x, ndigits)`, `math.hypot`, `numpy.random`. Each comes with a hint in `explain()`, or use `python -m pyrust_engine suggest file.py`.
 
 !!! note "NumPy scalars"
     In plain Python, `a[i]` and `for x in a` give NumPy scalars (`np.float64`). PyRust returns plain `float`/`int` with the same value. Comparisons between ints larger than 2**53 and floats replay in Python, because NumPy and Python compare them differently.
