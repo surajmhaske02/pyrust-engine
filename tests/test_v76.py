@@ -79,13 +79,13 @@ class Methods(unittest.TestCase):
         self.assertEqual(rows['Account.grow']['action'], 'add @optimize')  # types from __init__
         self.assertEqual(rows['plain']['action'], 'add @optimize')
         self.assertTrue(rows['Particle.speed']['action'].startswith('skip'))
-        self.assertIn('plain function', rows['Particle.calls']['problem']['hint'])
+        self.assertEqual(rows['Particle.calls']['action'], 'add @optimize')  # 0.7.7: self.speed() compiles
         self.assertIn('self.unknown', rows['Account.mystery']['problem']['message'])
         self.assertNotIn('Particle.helper', rows)  # staticmethods are left alone
 
     def test_apply(self):
         result = advisor.apply(self.path, write=True)
-        self.assertEqual(result['decorated'], ['Account.grow', 'Particle.advance', 'plain'])
+        self.assertEqual(result['decorated'], ['Account.grow', 'Particle.advance', 'Particle.calls', 'plain'])
         text = self.path.read_text()
         self.assertIn('    @optimize\n    def advance(self, dt: float, n: int) -> None:', text)
         self.assertIn('    @optimize\n    def grow(self, years: int) -> float:', text)
@@ -98,7 +98,7 @@ class Methods(unittest.TestCase):
         rows = {r['function']: r for r in mcp.check_code(CLASSES)['functions']}
         self.assertTrue(rows['Particle.advance']['compiles'])
         self.assertTrue(rows['Account.grow']['compiles'])
-        self.assertFalse(rows['Particle.calls']['compiles'])
+        self.assertTrue(rows['Particle.calls']['compiles'])  # calls self.speed()
         self.assertIn('fn compute', mcp.rust_source(CLASSES, 'Particle.advance')['rust'])
 
 

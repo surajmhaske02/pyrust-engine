@@ -111,20 +111,31 @@ def _init_kinds(cls):
 
 def method_kinds(cls, function, node):
     """Kinds to check a method with: `self` as an object whose attribute kinds come from the
-    class (annotations, dataclass fields, class attributes, simple __init__ assignments).
-    Returns (kinds, None) or (None, reason)."""
-    from .compiler import attribute_uses, default_kinds, object_kind
+    class (annotations, dataclass fields, class attributes, simple __init__ assignments),
+    including the attributes used by methods it calls on self. Returns (kinds, None) or
+    (None, reason)."""
+    from .compiler import class_object_uses, default_kinds, object_kind, object_uses
 
     params = [a.arg for a in node.args.args]
     if not params:
         return None, 'a method without self'
     first = params[0]
-    uses = attribute_uses(node, [first]).get(first)
+    uses = object_uses(node, [first], include_empty=True).get(first)
     if uses is None:
         return None, (
-            f'{first!r} is used as a whole (a method is called on it or it is passed on)\n'
-            f'  hint: make the helper a plain function that takes the values, like helper({first}.x)'
+            f'{first!r} is used as a whole (passed on, compared or reassigned)\n'
+            f'  hint: pass the values the loop needs, like helper({first}.x)'
         )
+    attrs, methods = uses
+    if methods:
+        found = class_object_uses(cls, attrs, methods)
+        if found is None:
+            return None, (
+                f'a method called on {first} cannot be compiled (a static/class method, a property, '
+                f'or it uses {first} as a whole)\n'
+                '  hint: make that helper a plain function that takes the values'
+            )
+        attrs = found[0]
     known = {}
     for klass in reversed(cls.__mro__[:-1]):
         for attr, value in vars(klass).items():
@@ -139,7 +150,7 @@ def method_kinds(cls, function, node):
             if kind:
                 known[attr] = kind
         known.update(_init_kinds(klass))
-    missing = sorted(a for a in uses if a not in known)
+    missing = sorted(a for a in attrs if a not in known)
     if missing:
         return None, (
             f'types of {", ".join(f"{first}.{a}" for a in missing)} are not known from the class\n'
@@ -149,7 +160,7 @@ def method_kinds(cls, function, node):
         kinds = default_kinds(function)
     except Exception as exc:
         return None, str(exc)
-    kinds[first] = object_kind([(a, known[a]) for a in sorted(uses)])
+    kinds[first] = object_kind([(a, known[a], attrs[a]) for a in sorted(attrs)], cls if methods else None)
     return kinds, None
 
 

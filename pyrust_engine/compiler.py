@@ -90,6 +90,7 @@ from .kinds import (  # noqa: F401, E402  (re-exported for the runtime)
     ITEM_KINDS,
     KEY_KINDS,
     LIST_KINDS,
+    NP_SMALL,
     NUMPY_KINDS,
     PANDAS_SERIES,
     PLACEHOLDERS,
@@ -98,15 +99,19 @@ from .kinds import (  # noqa: F401, E402  (re-exported for the runtime)
     RUST_TYPE,
     SCALARS,
     SERIES_NAMES,
+    SMALL_READ,
     STR_SERIES,
     TEXT,
     VALUES,
+    VIEW_KINDS,
+    VIEW_OF,
     ZERO,
     dict_parts,
     is_container,
     is_dict,
     is_packed,
     is_set,
+    object_class,
     object_kind,
     object_parts,
     resolve,
@@ -247,6 +252,17 @@ fn at2<T:Copy>(a:&Arr<T>,i:i64,k:i64)->Result<T,i32>{
     let r=index(a.rows,i)?; let c=index(a.cols,k)?; Ok(unsafe{*a.ptr.add(r*a.cols+c)})
 }
 fn put<T:Copy>(a:&mut Arr<T>,i:i64,v:T)->Result<(),i32>{let j=index(a.len,i)?; a.write(j,v); Ok(())}
+// Read-only views (NumPy slices a[lo:hi] and rows m[i]): they point into the array, no copy.
+fn view_slice<T:Copy>(a:&Arr<T>,lo:Option<i64>,hi:Option<i64>)->Arr<T>{
+    let (x,y)=bounds(a.len,lo,hi);
+    if y<=x || a.ptr.is_null() {return Arr::empty()}
+    Arr::view(unsafe{a.ptr.add(x)},y-x,1,false)
+}
+fn row_view<T:Copy>(a:&Arr<T>,i:i64)->Result<Arr<T>,i32>{
+    let r=index(a.rows,i)?;
+    if a.cols==0 || a.ptr.is_null() {return Ok(Arr::empty())}
+    Ok(Arr::view(unsafe{a.ptr.add(r*a.cols)},a.cols,1,false))
+}
 // pandas Series s[i] looks up the label i: negative numbers are not positions there.
 fn at_nn<T:Copy>(a:&Arr<T>,i:i64)->Result<T,i32>{if i<0 {return Err(3)} at(a,i)}
 fn has<T:Copy+PartialEq>(a:&Arr<T>,x:T)->bool{
@@ -530,6 +546,8 @@ KNOWN_BUILTINS = {
     'zip',
     'reversed',
 }
+# np.<name>(x) on one number, compiled with NumPy's exact result (see Compiler.numpy_scalar).
+NUMPY_SCALAR = ('sqrt', 'floor', 'ceil', 'trunc', 'isnan', 'isinf', 'isfinite', 'abs', 'absolute', 'fabs', 'square')
 NUMPY_MAKERS = {'zeros': 0, 'empty': 0, 'ones': 1, 'zeros_like': 0, 'empty_like': 0, 'ones_like': 1}
 # random module functions reproduced exactly (same Mersenne Twister state as Python's random).
 RANDOM_FUNCS = ('random', 'uniform', 'randint', 'randrange', 'gauss', 'choice')
@@ -600,6 +618,10 @@ def kind_of_value(value):
             return 'iarray' if value.ndim == 1 else 'iarray2'
         if value.dtype == np.float32 and NUMPY2():
             return 'farray' if value.ndim == 1 else 'farray2'
+        small = {np.dtype(np.int32): 'i32array', np.dtype(np.uint8): 'u8array', np.dtype(np.bool_): 'barray'}
+        kind = small.get(value.dtype)
+        if kind is not None:
+            return kind if value.ndim == 1 else kind + '2'
         return None
     return series_kind(value)
 
@@ -758,15 +780,16 @@ def default_kinds(function):
     return kinds
 
 
-def attribute_uses(function_node, params):
-    """{param: {attr: assigned?}} for parameters used only through their attributes
-    (obj.x reads, obj.x = v and obj.x += v). A parameter used any other way (passed on,
-    compared, a method called on it, an attribute deleted) is left out."""
+def object_uses(function_node, params, include_empty=False):
+    """{param: (attrs {attr: assigned?}, methods {name})} for parameters used only through
+    attributes (obj.x reads, obj.x = v, obj.x += v) and method calls (obj.m(...)). A
+    parameter used any other way (passed on, compared, reassigned, del obj.x) is left out."""
     parents = {}
     for parent in ast.walk(function_node):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
     uses: dict = {p: {} for p in params}
+    methods: dict = {p: set() for p in params}
     whole = set()
     for node in ast.walk(function_node):
         if not (isinstance(node, ast.Name) and node.id in uses):
@@ -776,14 +799,72 @@ def attribute_uses(function_node, params):
             whole.add(node.id)  # the parameter itself is reassigned
         elif isinstance(parent, ast.Attribute) and parent.value is node:
             grand = parents.get(parent)
-            if isinstance(parent.ctx, ast.Del) or (isinstance(grand, ast.Call) and grand.func is parent):
-                whole.add(node.id)  # del obj.x, obj.method()
-                continue
-            written = isinstance(parent.ctx, ast.Store)
-            uses[node.id][parent.attr] = uses[node.id].get(parent.attr, False) or written
+            if isinstance(parent.ctx, ast.Del):
+                whole.add(node.id)
+            elif isinstance(grand, ast.Call) and grand.func is parent:
+                methods[node.id].add(parent.attr)
+            else:
+                written = isinstance(parent.ctx, ast.Store)
+                uses[node.id][parent.attr] = uses[node.id].get(parent.attr, False) or written
         elif not isinstance(parent, ast.arguments):
             whole.add(node.id)
-    return {p: u for p, u in uses.items() if u and p not in whole}
+    return {p: (uses[p], methods[p]) for p in params if p not in whole and (include_empty or uses[p] or methods[p])}
+
+
+def attribute_uses(function_node, params):
+    """{param: {attr: assigned?}} for parameters used only through attributes (no method calls)."""
+    return {p: a for p, (a, m) in object_uses(function_node, params).items() if not m}
+
+
+def method_function(cls, name):
+    """(raw class attribute, plain function) for a method found on cls, or (None, None)."""
+    for klass in cls.__mro__:
+        if name in vars(klass):
+            raw = vars(klass)[name]
+            return (raw, _resolve_callee(raw)) if _resolve_callee(raw) is not None else (None, None)
+    return None, None
+
+
+def class_object_uses(cls, attrs, methods):
+    """(attrs, methods): attributes used by a function and by every method it calls on the
+    object (transitively), assigned flags merged; None when a method can't be compiled."""
+    out = dict(attrs)
+    todo, seen = list(methods), set()
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        _, fn = method_function(cls, name)
+        if fn is None:
+            return None
+        try:
+            node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+        except (OSError, TypeError, SyntaxError, IndentationError):
+            return None
+        params = [a.arg for a in node.args.args] if isinstance(node, ast.FunctionDef) else []
+        if not params:
+            return None
+        found = object_uses(node, [params[0]], include_empty=True).get(params[0])
+        if found is None:
+            return None  # the method uses its object as a whole
+        for attr, written in found[0].items():
+            out[attr] = out.get(attr, False) or written
+        todo.extend(found[1])
+    return out, seen
+
+
+class _MethodLookup:
+    """Guard namespace: finds a method through the class's MRO, like Python does."""
+
+    def __init__(self, cls):
+        self.cls = cls
+
+    def get(self, name, default=None):
+        for klass in self.cls.__mro__:
+            if name in vars(klass):
+                return vars(klass)[name]
+        return default
 
 
 def _resolve_callee(obj):
@@ -819,6 +900,8 @@ class Compiler(TextMixin):
             self.types[p] = 'slist'
         # Objects: each attribute the function uses becomes its own native parameter.
         self.objects = {}  # param -> [(attr, kind, synthetic name, written)]
+        self.object_kinds = {}  # param -> its 'obj...' kind (passed on to compiled methods)
+        self.object_classes = {}  # param -> class whose methods may be called, or None
         if any(object_parts(k) is not None for k in self.types.values()):
             self.expand_objects()
         self.globals = function.__globals__
@@ -1073,8 +1156,8 @@ class Compiler(TextMixin):
         ):
             self.fail(
                 sub,
-                'array slices are not compiled',
-                'Loop over indices instead of slicing, e.g. for i in range(start, stop): ... a[i] ...',
+                'this array slice is not compiled (a[lo:hi] on 1-D arrays and m[i, :] rows are)',
+                'Loop over indices instead, e.g. for i in range(start, stop): ... a[i] ...',
             )
         parts = node.elts if isinstance(node, ast.Tuple) else [node]
         if len(parts) != dims:
@@ -1097,13 +1180,15 @@ class Compiler(TextMixin):
     def element(self, sub, positional=False):
         name, kind, idx = self.indices(sub)
         if len(idx) == 2:
-            return f'at2({self.aref(name)},{",".join(idx)})?', READ_KIND[ELEMENT[kind]]
+            return self.read(f'at2({self.aref(name)},{",".join(idx)})?', kind)
         # s[i] on a Series looks up the label i (index 0..n-1); s.iloc[i] is positional.
         fn = 'at_nn' if kind in PANDAS_SERIES and not positional else 'at'
         return self.read(f'{fn}({self.aref(name)},{idx[0]})?', kind)
 
     def read(self, value, kind):
         """An element read from a sequence of this kind, as (rust, value kind)."""
+        if kind in SMALL_READ:
+            return value, SMALL_READ[kind]  # a NumPy int32 / uint8 / bool scalar
         element = ELEMENT[kind]
         if element == 'u8':
             return f'({value} as i64)', 'i64'
@@ -1222,6 +1307,8 @@ class Compiler(TextMixin):
             ):
                 self.guard(n.value.id, math)
                 return float_literal(getattr(math, n.attr)), 'f64'
+            if n.attr in ('pi', 'e', 'inf', 'nan') and self.numpy_module(n.value) is not None:
+                return float_literal(float(getattr(sys.modules['numpy'], n.attr))), 'f64'
             if n.attr == 'shape':
                 return self.shape(n)
             if n.attr == 'size':
@@ -1254,6 +1341,9 @@ class Compiler(TextMixin):
             ):
                 plain = ast.copy_location(ast.Subscript(value=n.value.value, slice=n.slice, ctx=ast.Load()), n)
                 return self.element(plain, positional=True)
+            row = self.row_view(n) or self.slice_view(n)
+            if row is not None:
+                return row
             return self.element(n)
         if isinstance(n, ast.UnaryOp):
             if isinstance(n.op, ast.Not):
@@ -1263,6 +1353,8 @@ class Compiler(TextMixin):
                 if isinstance(n.operand, ast.Constant) and type(n.operand.value) is int and n.operand.value == 2**63:
                     return 'i64::MIN', 'i64'
                 value, kind = self.expr(n.operand)
+                if kind in NP_SMALL:
+                    self.small_arithmetic(n)
                 if kind == 'f32':
                     return f'(-({value}))', 'f32'
                 value, kind = self.scalar(n.operand)
@@ -1369,6 +1461,8 @@ class Compiler(TextMixin):
     def binop(self, n, left, op, right):
         a, ta = self.expr(left)
         b, tb = self.expr(right)
+        if ta in NP_SMALL or tb in NP_SMALL:
+            self.small_arithmetic(n)
         if 'f32' in (ta, tb):
             return self.binop32(n, op, a, ta, left, b, tb, right)
         special = self.ext_binop(n, op, a, ta, left, b, tb, right)
@@ -1516,6 +1610,24 @@ class Compiler(TextMixin):
 
     def call(self, n):
         func, args = n.func, n.args
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in self.objects:
+            return self.method_call(n, func.value.id, func.attr)
+        if isinstance(func, ast.Attribute) and func.attr in NUMPY_SCALAR and self.numpy_module(func.value) is not None:
+            return self.numpy_scalar(n, func.attr)
+        if (
+            isinstance(func, ast.Name)
+            and func.id in ('int', 'float', 'bool')
+            and self.is_builtin(func.id)
+            and len(args) == 1
+            and not n.keywords
+        ):
+            value, kind = self.expr(args[0])
+            if kind in NP_SMALL:
+                if func.id == 'int':
+                    return f'(({value}) as i64)', 'i64'
+                if func.id == 'float':
+                    return f'(({value}) as i64 as f64)', 'f64'
+                return (f'({value})' if kind == 'npbool' else f'(({value}) != 0)'), 'bool'
         if isinstance(func, ast.Attribute) and func.attr in NUMPY_MAKERS and self.numpy_module(func.value) is not None:
             return self.numpy_maker(n)
         if (
@@ -1828,21 +1940,47 @@ class Compiler(TextMixin):
     def user_call(self, n, name, callee):
         statement = self.statement_call  # only this call may return None; its arguments may not
         self.statement_call = False
-        program = self.program
         sig = inspect.signature(callee)
         cparams = list(sig.parameters)
-        # Bind positional, keyword and default arguments like Python does.
+        values, kinds = self.bind_arguments(n, name, sig, cparams, cparams)
+        rust_name, return_type, written = self.compile_callee(n, name, callee, cparams, values, kinds, statement)
+        self.guard(name, self.lookup(name))
+        return self.render_call(n, rust_name, return_type, written, values, kinds, cparams)
+
+    def method_call(self, n, obj, method):
+        """obj.method(...) on an object parameter: the method is compiled with the same object
+        kind, so its attribute reads and writes go to the same native values."""
+        statement = self.statement_call
+        self.statement_call = False
+        cls = self.object_classes.get(obj)
+        raw, callee = method_function(cls, method) if cls is not None else (None, None)
+        name = f'{obj}.{method}'
+        if callee is None:
+            self.fail(n, f'{name}() is not a plain method of the class', 'Static and class methods are not compiled.')
+        sig = inspect.signature(callee)
+        cparams = list(sig.parameters)
+        if not cparams:
+            self.fail(n, f'{name}() takes no self parameter')
+        values, kinds = self.bind_arguments(n, name, sig, cparams, cparams[1:])
+        values = [('object', obj)] + values
+        kinds = [self.object_kinds[obj]] + kinds
+        rust_name, return_type, written = self.compile_callee(n, name, callee, cparams, values, kinds, statement)
+        self.program['guards'][('method', id(cls), method)] = (_MethodLookup(cls), {}, method, raw)
+        return self.render_call(n, rust_name, return_type, written, values, kinds, cparams)
+
+    def bind_arguments(self, n, name, sig, cparams, bindable):
+        """(values, kinds) for the parameters in `bindable`, like Python binds a call."""
         bound = {}
-        if len(n.args) > len(cparams):
-            self.fail(n, f'{name}() takes {len(cparams)} arguments')
-        for p, arg in zip(cparams, n.args):
+        if len(n.args) > len(bindable):
+            self.fail(n, f'{name}() takes {len(bindable)} arguments')
+        for p, arg in zip(bindable, n.args):
             bound[p] = arg
         for kw in n.keywords:
-            if kw.arg is None or kw.arg not in cparams or kw.arg in bound:
+            if kw.arg is None or kw.arg not in bindable or kw.arg in bound:
                 self.fail(n, f'bad keyword argument for {name}()')
             bound[kw.arg] = kw.value
         values, kinds = [], []
-        for p in cparams:
+        for p in bindable:
             if p in bound:
                 if (
                     isinstance(bound[p], ast.Name)
@@ -1853,8 +1991,8 @@ class Compiler(TextMixin):
                     kinds.append(self.types[bound[p].id])
                     continue
                 value, kind = self.expr(bound[p])
-                if is_container(kind) or kind in LIST_KINDS:
-                    values.append(('temp', value))  # a new list/dict made for this call
+                if is_container(kind) or kind in LIST_KINDS or kind in VIEW_KINDS:
+                    values.append(('temp', value))  # a new list/dict (or an array view) made for this call
                     kinds.append(resolve(kind))
                     continue
                 if kind not in VALUES:
@@ -1868,6 +2006,11 @@ class Compiler(TextMixin):
                 value, kind = self.expr(ast.Constant(value=default))
                 values.append(('value', value))
                 kinds.append(kind)
+        return values, kinds
+
+    def compile_callee(self, n, name, callee, cparams, values, kinds, statement):
+        """Compile (once per argument kinds) a called function; returns (rust name, return kind, written)."""
+        program = self.program
         key = (id(callee), tuple(kinds))
         if callee in program['stack'] and key in program['index']:
             entry = program['index'][key]
@@ -1904,10 +2047,21 @@ class Compiler(TextMixin):
         _, rust_name, params, return_type, written = program['index'][key]
         if return_type in (None, 'none') and not statement:
             self.fail(n, f'called function {name!r} does not return a value')
-        self.guard(name, self.lookup(name))
+        return rust_name, return_type, written
+
+    def render_call(self, n, rust_name, return_type, written, values, kinds, cparams):
         rendered = []
-        for (what, value), kind, p in zip(values, params, cparams):
-            if what == 'temp':
+        for (what, value), kind, p in zip(values, kinds, cparams):
+            if what == 'object':
+                # One argument per attribute, in the order of the object kind (the callee expands
+                # its own object parameter from the same kind).
+                for attr, akind, synth, assigned in self.objects[value]:
+                    callee_name = f'_pyrust_attr_{p}__{attr}'
+                    if assigned or akind in ARRAY_KINDS or is_container(akind):
+                        rendered.append(self.amut(synth, n) if callee_name in written else self.aref(synth))
+                    else:
+                        rendered.append(self.name(synth))
+            elif what == 'temp':
                 rendered.append(f'&mut ({value})' if p in written else f'&({value})')
             elif what == 'array':
                 rendered.append(self.amut(value, n) if p in written else self.aref(value))
@@ -1971,8 +2125,10 @@ class Compiler(TextMixin):
                 parts.append(f'(({a}) {ops[type(op)]} ({b}))')
             return '(' + ' && '.join(parts) + ')'
         value, kind = self.expr(n)
-        if kind == 'bool':
+        if kind in ('bool', 'npbool'):
             return f'({value})'
+        if kind in ('npi32', 'npu8'):
+            return f'(({value}) != 0)'
         if kind == 'i64':
             return f'(({value}) != 0i64)'
         if kind == 'f64':
@@ -2027,6 +2183,10 @@ class Compiler(TextMixin):
         if literal is not None and abs(literal) > 2**53:
             literal = None
         value, kind = self.expr(node)
+        if kind in ('npi32', 'npu8'):
+            value, kind = f'(({value}) as i64)', 'i64'  # comparing never overflows
+        elif kind == 'npbool':
+            kind = 'bool'
         return value, kind, literal
 
     # ------------------------------------------------------------- statements
@@ -2104,6 +2264,8 @@ class Compiler(TextMixin):
         if name in self.params and name not in self.written:
             self.written.add(name)
         element = ELEMENT[kind]
+        if kind in SMALL_READ:
+            return self.store_small(node, name, kind, idx, value_node, op)
         j = self.temp('w')
         names = [f'{j}i{k}' for k in range(len(idx))]
         index_lets = ' '.join(f'let {nm}: i64 = {ix};' for nm, ix in zip(names, idx))
@@ -2120,6 +2282,12 @@ class Compiler(TextMixin):
                     f'{"float" if element == "f64" else "int"} values here',
                     'Convert first, for example lst[i] = float(x), so the list keeps one type.',
                 )
+            if vkind in NP_SMALL and kind in LIST_KINDS:
+                self.fail(node, 'a list would keep the NumPy scalar object', 'Store int(x) or float(x).')
+            if vkind in ('npi32', 'npu8'):
+                value, vkind = f'(({value}) as i64)', 'i64'  # NumPy casts exactly into wider arrays
+            elif vkind == 'npbool':
+                vkind = 'bool'
             if vkind == 'bool':
                 value, vkind = f'({value} as i64)', 'i64'
             elif vkind not in ('i64', 'f64', 'f32'):
@@ -2239,6 +2407,16 @@ class Compiler(TextMixin):
                 else:
                     lines.append('break;' if isinstance(n, ast.Break) else 'continue;')
                 exits = True
+            elif type(n) is ast.Try:
+                lines.append(self.try_block(n))
+                exits = self.exits
+            elif isinstance(n, ast.Raise):
+                # The exception is raised by Python: the call stops here and replays in Python.
+                lines.append('return Err(9);')
+                exits = True
+            elif isinstance(n, ast.Assert):
+                if not sys.flags.optimize:  # python -O removes assert statements
+                    lines.append(f'if !({self.condition(n.test)}) {{ return Err(9); }}')
             elif isinstance(n, ast.Delete) or (
                 isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and self.ext_statement_peek(n)
             ):
@@ -2246,9 +2424,18 @@ class Compiler(TextMixin):
             elif (
                 isinstance(n, ast.Expr)
                 and isinstance(n.value, ast.Call)
-                and isinstance(n.value.func, ast.Name)
-                and n.value.func.id not in self.local_names
-                and _resolve_callee(self.lookup(n.value.func.id)) is not None
+                and (
+                    (
+                        isinstance(n.value.func, ast.Name)
+                        and n.value.func.id not in self.local_names
+                        and _resolve_callee(self.lookup(n.value.func.id)) is not None
+                    )
+                    or (
+                        isinstance(n.value.func, ast.Attribute)
+                        and isinstance(n.value.func.value, ast.Name)
+                        and n.value.func.value.id in self.objects
+                    )
+                )
             ):
                 # helper(x, counts): a call made for what it changes in its arguments.
                 self.statement_call = True
@@ -2305,6 +2492,12 @@ class Compiler(TextMixin):
     def return_value(self, n):
         if self.parallel is not None:
             self.fail(n, 'return is not allowed inside prange')
+        if self.expr_kind(n.value) in NP_SMALL:
+            self.fail(
+                n,
+                'returning a NumPy int32/uint8/bool value is not compiled',
+                'Return int(x), float(x) or bool(x) instead.',
+            )
         returned = self.types.get(n.value.id) if isinstance(n.value, ast.Name) and n.value.id in self.assigned else None
         if returned in ARRAY_KINDS or is_container(returned):
             name = n.value.id
@@ -2328,6 +2521,17 @@ class Compiler(TextMixin):
         return f'return Ok({value});'
 
     def for_loop(self, n):
+        if isinstance(n.iter, ast.Subscript) and self.parallel is None:
+            view = self.row_view(n.iter) or self.slice_view(n.iter)
+            if view is not None:
+                # for x in a[1:] / m[i, :]: name the view, then loop over it like an array.
+                name = f'_pyrust_view{self.temp("V")}'
+                line = self.assign(n, name, *view)
+                loop = ast.copy_location(
+                    ast.For(target=n.target, iter=ast.Name(id=name, ctx=ast.Load()), body=n.body, orelse=n.orelse), n
+                )
+                ast.fix_missing_locations(loop)
+                return line + '\n' + self.for_loop(loop)
         call = n.iter
         before = self.assigned.copy()
         j = self.temp('L')
@@ -2694,7 +2898,7 @@ match result {{ Ok(Ok(v)) => PyrustFast{{ value: {'v' if rt != 'none' else '0'},
             fast += self.py_entry(rt)
         elif self.direct_eligible():
             fast = self.py_entry_run(rt, ffi)
-        return f"""// Generated by PyRust Engine 0.7.6.
+        return f"""// Generated by PyRust Engine 0.7.7.
 #![allow(unused_mut,unused_assignments,unused_parens,unreachable_code,dead_code,unused_variables,while_true,unused_braces,unused_unsafe,non_snake_case,unused_imports)]
 {HELPERS}
 {TEXT_HELPERS}
@@ -2718,7 +2922,7 @@ status
         """Replace obj.attr by a parameter per attribute: read-only attributes are passed by
         value (arrays by reference); a number attribute that the function assigns is passed
         as a one-element list and written back to the object by the runtime on success."""
-        uses = attribute_uses(self.node, [p for p, k in self.types.items() if object_parts(k) is not None])
+        uses = object_uses(self.node, [p for p, k in self.types.items() if object_parts(k) is not None])
         params, types = [], {}
         for p in self.params:
             parts = object_parts(self.types[p])
@@ -2726,16 +2930,28 @@ status
                 params.append(p)
                 types[p] = self.types[p]
                 continue
-            if p not in uses:
+            if p not in uses and parts:
                 raise Unsupported(
-                    f'{self.function.__name__}: {p!r} is used as a whole (passed on, compared or a method is called); '
-                    'only reading and assigning its attributes is compiled\n'
-                    f'  hint: pass the values the loop needs instead of {p!r}, or make the method a plain function'
+                    f'{self.function.__name__}: {p!r} is used as a whole (passed on, compared or reassigned); '
+                    'only its attributes and its methods are compiled\n'
+                    f'  hint: pass the values the loop needs instead of {p!r}'
                 )
+            own, methods = uses.get(p, ({}, set()))
+            cls = object_class(self.types[p])
+            if methods and cls is None:
+                raise Unsupported(
+                    f'{self.function.__name__}: {p}.{sorted(methods)[0]}() is called; methods are compiled only '
+                    'when the object comes from a real call\n'
+                    '  hint: decorate the method and call it, or make the helper a plain function that takes the values'
+                )
+            self.object_kinds[p] = self.types[p]
+            self.object_classes[p] = cls
+            flagged = {attr: written for attr, _, written in parts}
             entries = []
-            for attr, kind in parts:
+            for attr, kind, written in parts:
+                if own.get(attr) and not written:
+                    raise Unsupported(f'{self.function.__name__}: {p}.{attr} is assigned but not marked as assigned')
                 name = f'_pyrust_attr_{p}__{attr}'
-                written = uses[p].get(attr, False)
                 if written and kind not in ('i64', 'f64'):
                     raise Unsupported(
                         f'{self.function.__name__}: assigning {p}.{attr} ({kind}) is not compiled; '
@@ -2744,6 +2960,9 @@ status
                 entries.append((attr, kind, name, written))
                 params.append(name)
                 types[name] = ('flist' if kind == 'f64' else 'ilist') if written else kind
+            missing = [a for a in own if a not in flagged]
+            if missing:
+                raise Unsupported(f'{self.function.__name__}: attribute {p}.{missing[0]} was not read before the call')
             self.objects[p] = entries
         self.params = params
         self.types = types
@@ -2765,6 +2984,141 @@ status
 
         self.node = Rewrite().visit(self.node)
         ast.fix_missing_locations(self.node)
+
+    def small_arithmetic(self, n):
+        self.fail(
+            n,
+            'arithmetic on NumPy int32/uint8/bool values is not compiled (NumPy wraps around on overflow)',
+            'Convert first, like int(a[i]) + 1 or float(img[i, j]) * 0.5.',
+        )
+
+    def expr_kind(self, node):
+        """The kind of an expression without keeping its code (for checks)."""
+        if isinstance(node, ast.Name) and node.id in self.types and node.id in self.assigned:
+            return self.types[node.id]
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            kind = self.types.get(node.value.id)
+            if kind in SMALL_READ and not isinstance(node.slice, ast.Slice):
+                return SMALL_READ[kind]
+        return None
+
+    def store_small(self, node, name, kind, idx, value_node, op):
+        """a[i] = v into an int32 / uint8 / bool array: NumPy's rules (out-of-range ints raise)."""
+        if op is not None:
+            self.fail(
+                node,
+                'a[i] += v on int32/uint8/bool arrays is not compiled (NumPy wraps around on overflow)',
+                'Write a[i] = int(a[i]) + v instead.',
+            )
+        element = ELEMENT[kind]
+        value, vkind = self.expr(value_node)
+        if element == 'bool':
+            if vkind in ('bool', 'npbool'):
+                converted = f'({value})'
+            elif vkind in ('i64', 'npi32', 'npu8'):
+                converted = f'(({value}) != 0)'
+            else:
+                self.fail(node, 'bool arrays can only store bools and ints here')
+        else:
+            if vkind in ('bool', 'npbool'):
+                converted = f'(({value}) as {element})'
+            elif vkind == SMALL_READ[kind]:
+                converted = f'({value})'
+            elif vkind in ('i64', 'npi32', 'npu8'):
+                converted = f'{element}::try_from(({value}) as i64).map_err(|_| 6)?'  # NumPy raises OverflowError
+            else:
+                self.fail(node, 'int32/uint8 arrays can only store ints here', 'Convert with int(x) first.')
+        j = self.temp('w')
+        names = [f'{j}i{k}' for k in range(len(idx))]
+        index_lets = ' '.join(f'let {nm}: i64 = {ix};' for nm, ix in zip(names, idx))
+        writer = 'put' if len(idx) == 1 else 'put2'
+        destination = (
+            f'{writer}_par({self.aref(name)},' if self.parallel is not None else f'{writer}({self.amut(name, node)},'
+        )
+        return f'{{ {index_lets} let {j}v: {element} = {converted}; {destination}{",".join(names)},{j}v)?; }}'
+
+    def row_view(self, n):
+        """m[i] or m[i, :] on a 2-D NumPy array: a read-only view of row i (no copy)."""
+        if not isinstance(n.value, ast.Name) or n.value.id not in self.assigned:
+            return None
+        kind = self.types.get(n.value.id)
+        if kind not in ('array2', 'iarray2', 'farray2'):
+            return None
+        node = n.slice
+        if isinstance(node, ast.Tuple):
+            if len(node.elts) != 2 or not isinstance(node.elts[1], ast.Slice):
+                return None
+            whole = node.elts[1]
+            if whole.lower is not None or whole.upper is not None or whole.step is not None:
+                self.fail(n, 'only whole rows m[i, :] are compiled', 'Index single elements: m[i, j].')
+            node = node.elts[0]
+        elif isinstance(node, ast.Slice):
+            return None
+        index = self.expect(node, 'i64')
+        return f'row_view({self.aref(n.value.id)},{index})?', VIEW_OF[kind]
+
+    def slice_view(self, n):
+        """a[lo:hi] on a 1-D NumPy array (or view): a read-only view, like NumPy (no copy)."""
+        if not (isinstance(n.slice, ast.Slice) and isinstance(n.value, ast.Name) and n.value.id in self.assigned):
+            return None
+        kind = self.types.get(n.value.id)
+        if kind not in ('array', 'iarray', 'farray', *VIEW_KINDS):
+            return None
+        sl = n.slice
+        if sl.step is not None and not (isinstance(sl.step, ast.Constant) and sl.step.value in (1, None)):
+            self.fail(n, 'slices with a step are not compiled', 'Loop with range(start, stop, step) instead.')
+        if self.parallel is not None:
+            self.fail(n, 'slices cannot be made inside prange', 'Make the slice before the loop.')
+        lo, hi = self.bound(sl.lower), self.bound(sl.upper)
+        return f'view_slice({self.aref(n.value.id)},{lo},{hi})', VIEW_OF[kind]
+
+    def numpy_scalar(self, n, attr):
+        """np.sqrt(x) and friends on one number. Only functions whose result is exactly the
+        same as NumPy's are compiled; NumPy warnings (sqrt of a negative, overflow) replay in Python."""
+        if len(n.args) != 1 or n.keywords:
+            self.fail(n, f'np.{attr}() is compiled with one argument')
+        value, kind = self.expr(n.args[0])
+        if kind == 'bool':
+            value, kind = f'(({value}) as i64)', 'i64'
+        if kind not in ('i64', 'f64'):
+            self.fail(n, f'np.{attr}() is compiled on int and float values')
+        t = self.temp('n')
+        x = f'(({value}) as f64)'
+        if attr == 'sqrt':
+            return f'({{ let {t}: f64 = {x}; if {t} < 0.0 {{ return Err(6) }} {t}.sqrt() }})', 'f64'
+        if attr in ('floor', 'ceil', 'trunc'):
+            return f'({x}.{attr}())', 'f64'
+        if attr in ('isnan', 'isinf', 'isfinite'):
+            test = {'isnan': 'is_nan', 'isinf': 'is_infinite', 'isfinite': 'is_finite'}[attr]
+            return f'({x}.{test}())', 'bool'
+        if attr in ('abs', 'absolute', 'fabs'):
+            if kind == 'i64' and attr != 'fabs':
+                return f'(({value}).checked_abs().ok_or(1)?)', 'i64'
+            return f'({x}.abs())', 'f64'
+        if attr == 'square':
+            if kind == 'i64':
+                return f'({{ let {t}: i64 = {value}; {t}.checked_mul({t}).ok_or(1)? }})', 'i64'
+            return (
+                f'({{ let {t}: f64 = {x}; let r = {t} * {t}; if r.is_infinite() && {t}.is_finite() {{ return Err(6) }} r }})',
+                'f64',
+            )
+        self.fail(n, f'np.{attr}() is not compiled')
+
+    def try_block(self, n):
+        """try/except: the try body (and else/finally) runs natively. If anything in it would
+        raise, the native call stops and the whole call replays in Python, which runs the
+        matching except block exactly. Fast when exceptions are rare."""
+        if n.finalbody:
+            for part in n.body + n.orelse:
+                for x in ast.walk(part):
+                    if isinstance(x, (ast.Return, ast.Break, ast.Continue)):
+                        self.fail(
+                            x,
+                            'return, break or continue inside try ... finally is not compiled',
+                            'Move the return after the try statement.',
+                        )
+        body = self.block(n.body + n.orelse + n.finalbody)
+        return '{\n' + body + '\n}'
 
     def check_series_uses(self):
         """Series of str: allow s[i], len(s), loops and builtins that only iterate the values."""
@@ -2835,7 +3189,7 @@ status
         bytes in; a number, bool or None out."""
         return (
             all(self.types[p] in DIRECT_KINDS for p in self.params)
-            and resolve(self.return_type) in FAST_RETURNS
+            and resolve(self.return_type) in (*FAST_RETURNS, 'strv', 'flist', 'ilist')
             and not self.program['random']
             and not self.objects
         )
@@ -2853,6 +3207,7 @@ status
             'let mut ranges:Vec<(usize,usize,bool)>=Vec::new();',
         ]
         call = []
+        lists = []  # (position, kind, written) of list arguments
         for k, p in enumerate(self.params):
             kind = self.types[p]
             lines.append(f'let o{k}=(a.tuple_get)(args,{k}); let t{k}=(a.type_of)(o{k}); (a.decref)(t{k});')
@@ -2880,10 +3235,18 @@ status
                     f'if x{k}.is_null() || n{k}<0 {{(a.clear_error)(); slow!(-1)}}'
                 )
                 call += [f'x{k}', f'n{k} as usize', '1usize']
+            elif kind in ('flist', 'ilist'):
+                reader = 'py_read_list_f' if kind == 'flist' else 'py_read_list_i'
+                lines.append(
+                    f'if t{k}!=a.list_type {{slow!(-1)}} let mut b{k}=match {reader}(a,o{k}) '
+                    f'{{Some(v)=>v, None=>{{slow!(-1)}}}}; let x{k}=b{k}.as_mut_ptr(); let n{k}=b{k}.len();'
+                )
+                lists.append((k, kind, p in self.written))
+                call += [f'x{k}', f'n{k}', '1usize']
             else:  # NumPy arrays
                 element, dims = ARRAY_INFO[kind]
-                code = {'f64': 'd', 'f32': 'f', 'i64': 'l'}[element]
-                size = 4 if element == 'f32' else 8
+                code = {'f64': 'd', 'f32': 'f', 'i64': 'l', 'i32': 'i', 'u8': 'B', 'bool': '?'}[element]
+                size = {'f64': 8, 'i64': 8, 'f32': 4, 'i32': 4, 'u8': 1, 'bool': 1}[element]
                 written = p in self.written
                 flags = 0x3C | (0x1 if written else 0)  # C-contiguous, format, (writable)
                 lines.append(
@@ -2901,8 +3264,22 @@ status
             'for i in 0..ranges.len() {for j in i+1..ranges.len() {let (a0,a1,w0)=ranges[i]; let (b0,b1,w1)=ranges[j]; '
             'if (w0||w1) && a0<b1 && b0<a1 {slow!(-1)}}}'
         )
+        for i, (k1, _, w1) in enumerate(lists):
+            for k2, _, w2 in lists[i + 1 :]:
+                if w1 or w2:  # the same list twice, and written: the runtime runs it as Python
+                    lines.append(f'if o{k1}==o{k2} {{slow!(-1)}}')
         if rt == 'none':
             outs = []
+        elif rt == 'strv':
+            lines.append('let mut op:*mut u8=std::ptr::null_mut(); let mut ol:usize=0;')
+            outs = ['&mut op', '&mut ol']
+        elif rt in ('flist', 'ilist'):
+            element = 'f64' if rt == 'flist' else 'i64'
+            lines.append(
+                f'let mut op:*mut {element}=std::ptr::null_mut(); let mut ol:usize=0; '
+                'let mut orows:usize=0; let mut ocols:usize=0;'
+            )
+            outs = ['&mut op', '&mut ol', '&mut orows', '&mut ocols']
         else:
             lines.append(f'let mut out0:{RUST_TYPE[rt]}={ZERO[rt]};')
             outs = ['&mut out0']
@@ -2911,8 +3288,30 @@ status
             f'let st=pyrust_run({", ".join(call + outs + ["s.budget", "std::ptr::null()"])}); (a.restore)(ts);'
         )
         lines.append('if st!=0 {slow!(st as i64)}')
+        for k, kind, written in lists:
+            if written:
+                maker = 'py_new_list_f' if kind == 'flist' else 'py_new_list_i'
+                lines.append(f'if !py_write_list(a,o{k},{maker}(a,&b{k})) {{return std::ptr::null_mut()}}')
         lines.append('held.release(); s.count.fetch_add(1,std::sync::atomic::Ordering::Relaxed);')
-        if rt == 'i64':
+        if rt == 'strv':
+            lines.append(
+                'let w=std::slice::from_raw_parts(op as *const u8,ol); '
+                'let sep=u64::from_le_bytes(w[0..8].try_into().unwrap()); '
+                'let total=u64::from_le_bytes(w[8..16].try_into().unwrap()) as usize; '
+                'let start=if sep!=u64::MAX {16} else {24}; '
+                'let chars:Vec<u32>=w[start..start+4*total].chunks_exact(4)'
+                '.map(|c| u32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect(); '
+                'pyrust_free_u8(op,ol); '
+                '(a.unicode_from)(4,chars.as_ptr() as *const PyV,total as isize)'
+            )
+        elif rt in ('flist', 'ilist'):
+            element = 'f64' if rt == 'flist' else 'i64'
+            maker = 'py_new_list_f' if rt == 'flist' else 'py_new_list_i'
+            lines.append(
+                f'let v:&[{element}]=if ol==0 {{&[]}} else {{std::slice::from_raw_parts(op,ol)}}; '
+                f'let l={maker}(a,v); pyrust_free_{element}(op,ol); l'
+            )
+        elif rt == 'i64':
             lines.append('(a.from_ll)(out0)')
         elif rt == 'f64':
             lines.append('(a.from_double)(out0)')
@@ -2982,6 +3381,13 @@ type PyV=std::ffi::c_void;
     bytes_ptr: unsafe extern "C" fn(*mut PyV)->*mut u8,
     bytes_len: unsafe extern "C" fn(*mut PyV)->isize,
     str_type: *mut PyV, bytes_type: *mut PyV,
+    list_size: unsafe extern "C" fn(*mut PyV)->isize,
+    list_get: unsafe extern "C" fn(*mut PyV,isize)->*mut PyV,
+    list_new: unsafe extern "C" fn(isize)->*mut PyV,
+    list_set: unsafe extern "C" fn(*mut PyV,isize,*mut PyV)->i32,
+    list_set_slice: unsafe extern "C" fn(*mut PyV,isize,isize,*mut PyV)->i32,
+    unicode_from: unsafe extern "C" fn(i32,*const PyV,isize)->*mut PyV,
+    list_type: *mut PyV,
 }
 // Py_buffer (stable layout); numpy arrays are read through the buffer protocol.
 #[repr(C)] pub struct PyBuf {
@@ -3002,7 +3408,40 @@ impl<'a> Drop for PyHeld<'a> { fn drop(&mut self){unsafe{self.release()}} }
 unsafe fn py_format(b:&PyBuf,element:u8)->bool{
     if b.format.is_null() {return false}
     let c=*b.format; let end=*b.format.add(1)==0;
-    end && match element {b'd'=>c==b'd'&&b.itemsize==8, b'f'=>c==b'f'&&b.itemsize==4, _=>(c==b'l'||c==b'q')&&b.itemsize==8}
+    end && match element {
+        b'd'=>c==b'd'&&b.itemsize==8, b'f'=>c==b'f'&&b.itemsize==4,
+        b'i'=>(c==b'i'||c==b'l')&&b.itemsize==4, b'B'=>c==b'B'&&b.itemsize==1, b'?'=>c==b'?'&&b.itemsize==1,
+        _=>(c==b'l'||c==b'q')&&b.itemsize==8,
+    }
+}
+// A Python list of floats or ints copied into native memory (exact element types, like the runtime).
+unsafe fn py_read_list_f(a:&PyApi,o:*mut PyV)->Option<Vec<f64>>{
+    let n=(a.list_size)(o); if n<0 {(a.clear_error)(); return None}
+    let mut v=Vec::with_capacity(n as usize);
+    for q in 0..n {let it=(a.list_get)(o,q); let t=(a.type_of)(it); (a.decref)(t); if t!=a.float_type {return None} v.push((a.as_double)(it));}
+    Some(v)
+}
+unsafe fn py_read_list_i(a:&PyApi,o:*mut PyV)->Option<Vec<i64>>{
+    let n=(a.list_size)(o); if n<=0 {(a.clear_error)(); return None}  // an empty list counts as a list of floats
+    let mut v=Vec::with_capacity(n as usize);
+    for q in 0..n {
+        let it=(a.list_get)(o,q); let t=(a.type_of)(it); (a.decref)(t); if t!=a.int_type {return None}
+        let mut f:i32=0; let x=(a.as_ll)(it,&mut f); if f!=0 {return None} v.push(x);
+    }
+    Some(v)
+}
+// lst[:] = values (what the runtime does after a call that wrote the list).
+unsafe fn py_write_list(a:&PyApi,o:*mut PyV,items:*mut PyV)->bool{
+    if items.is_null() {return false}
+    let r=(a.list_set_slice)(o,0,isize::MAX,items); (a.decref)(items); r==0
+}
+unsafe fn py_new_list_f(a:&PyApi,v:&[f64])->*mut PyV{
+    let l=(a.list_new)(v.len() as isize); if l.is_null() {return l}
+    for (q,&x) in v.iter().enumerate() {(a.list_set)(l,q as isize,(a.from_double)(x));} l
+}
+unsafe fn py_new_list_i(a:&PyApi,v:&[i64])->*mut PyV{
+    let l=(a.list_new)(v.len() as isize); if l.is_null() {return l}
+    for (q,&x) in v.iter().enumerate() {(a.list_set)(l,q as isize,(a.from_ll)(x));} l
 }
 #[repr(C)] pub struct PyCall {
     count: std::sync::atomic::AtomicU64, budget: u64, fallback: *mut PyV,

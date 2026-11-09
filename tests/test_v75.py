@@ -107,9 +107,9 @@ class Objects(unittest.TestCase):
         kinds = {'self': 'obj(x:f64,vx:f64)', 'dt': 'f64', 'n': 'i64'}
         with self.assertRaises(Unsupported) as caught:
             Compiler(k.Particle.calls_method, kinds={'self': 'obj()'}).generate()
-        self.assertIn('used as a whole', str(caught.exception))
+        self.assertIn('methods are compiled only when the object comes from a real call', str(caught.exception))
         source = Compiler(
-            k.Particle.advance, kinds={**kinds, 'self': 'obj(steps:i64,vx:f64,vy:f64,x:f64,y:f64)'}
+            k.Particle.advance, kinds={**kinds, 'self': 'obj(steps:i64!,vx:f64,vy:f64!,x:f64!,y:f64!)'}
         ).generate()
         self.assertIn('fn compute', source)
         self.assertNotIn('pyrust_py_call', source)  # objects use the normal path

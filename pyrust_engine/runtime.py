@@ -6,6 +6,7 @@ import ctypes
 import functools
 import hashlib
 import inspect
+import logging
 import os
 import platform
 import random as _random
@@ -15,6 +16,7 @@ import threading
 import time
 import types
 import warnings
+import weakref
 from collections import Counter
 from typing import Any, Callable, Optional, ParamSpec, Protocol, TypeVar, overload
 
@@ -27,11 +29,13 @@ from .compiler import (
     NUMPY_KINDS,
     Compiler,
     Unsupported,
-    attribute_uses,
+    class_object_uses,
     default_kinds,
     is_packed,
     kind_of_value,
     object_kind,
+    object_parts,
+    object_uses,
     tuple_parts,
 )
 from .toolchain import ToolchainError
@@ -46,6 +50,7 @@ _STATUS = {
     'or recursion deeper than 300 levels)',
     7: 'interrupted',
     8: 'internal error in generated code (replayed in Python; please report it)',
+    9: 'an exception (raise, a failed assert or an error inside try) is handled by Python',
 }
 _TYPE_NAMES = {
     'i64': 'int',
@@ -72,6 +77,15 @@ _TYPE_NAMES = {
     'f32': 'numpy.float32',
     'farray': 'F32Array',
     'farray2': 'F32Array2',
+    'i32array': 'numpy int32 array',
+    'i32array2': 'numpy int32 2-D array',
+    'u8array': 'numpy uint8 array',
+    'u8array2': 'numpy uint8 2-D array',
+    'barray': 'numpy bool array',
+    'barray2': 'numpy bool 2-D array',
+    'aview': 'numpy float64 slice',
+    'iaview': 'numpy int64 slice',
+    'faview': 'numpy float32 slice',
     'none': 'None',
 }
 _ITEM_NAMES = {'strv': 'str', 'i64': 'int', 'f64': 'float', 'bool': 'bool'}
@@ -91,7 +105,7 @@ _SERIES_DTYPE = {
     'plseries': 'float64',
     'iplseries': 'int64',
 }
-_NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64', 'f32': 'float32'}
+_NUMPY_DTYPE = {'f64': 'float64', 'i64': 'int64', 'f32': 'float32', 'i32': 'int32', 'u8': 'uint8', 'bool': 'bool'}
 
 
 def _fast_result(ctype):
@@ -139,6 +153,15 @@ _CAPI_MORE = (
     'PyBytes_AsString',
     'PyBytes_Size',
 )
+# Appended after str and bytes (0.7.7: lists in, lists and str out).
+_CAPI_LISTS = (
+    'PyList_Size',
+    'PyList_GetItem',
+    'PyList_New',
+    'PyList_SetItem',
+    'PyList_SetSlice',
+    'PyUnicode_FromKindAndData',
+)
 _CAPI: Any = None
 
 
@@ -156,7 +179,8 @@ def _capi():
                 pointers = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_NAMES]
                 objects = [id(int), id(float), id(bool), id(True), id(False), id(None)]
                 more = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_MORE]
-                values = [*pointers, *objects, *more, id(str), id(bytes)]
+                lists = [ctypes.cast(getattr(api, name), ctypes.c_void_p).value for name in _CAPI_LISTS]
+                values = [*pointers, *objects, *more, id(str), id(bytes), *lists, id(list)]
                 table = (ctypes.c_void_p * len(values))(*values)
                 new = api.PyCFunction_NewEx
                 new.argtypes = [ctypes.c_void_p, ctypes.py_object, ctypes.py_object]
@@ -232,6 +256,74 @@ class PyRustFallbackWarning(RuntimeWarning):
 
 class RustToolchainWarning(PyRustFallbackWarning):
     """Rust is missing or broken on this machine, so every decorated function runs as plain Python."""
+
+
+# ----------------------------------------------------------------- observability
+logger = logging.getLogger('pyrust_engine')
+_FUNCTIONS: 'weakref.WeakSet[_Optimized]' = weakref.WeakSet()
+_FALLBACK_HOOKS: list = []
+
+
+def on_fallback(callback):
+    """Call callback(function_name, reason) every time a decorated function runs as plain
+    Python (for metrics, alerts or logs). Returns a function that removes the callback."""
+    _FALLBACK_HOOKS.append(callback)
+
+    def remove():
+        if callback in _FALLBACK_HOOKS:
+            _FALLBACK_HOOKS.remove(callback)
+
+    return remove
+
+
+def stats():
+    """One row per @optimize function used in this process: calls, how many ran natively,
+    how many ran as plain Python and why. Functions that fall back most come first."""
+    rows = []
+    for item in list(_FUNCTIONS):
+        report = item.report()
+        if not report['calls'] and report['backend'] == 'pending':
+            continue
+        reasons = sorted(report['fallback_reasons'].items(), key=lambda kv: -kv[1])
+        rows.append(
+            {
+                'function': f'{item.fn.__module__}.{item.fn.__qualname__}',
+                'calls': report['calls'],
+                'native_calls': report['native_calls'],
+                'fallback_calls': report['fallback_calls'],
+                'fallback_rate': report['fallback_rate'],
+                'backend': report['backend'],
+                'dispatch': report['dispatch'],
+                'compile_seconds': report['compile_seconds'],
+                'top_reasons': [{'reason': r.splitlines()[0], 'calls': c} for r, c in reasons[:3]],
+            }
+        )
+    rows.sort(key=lambda r: (-r['fallback_calls'], -r['calls'], r['function']))
+    return rows
+
+
+def print_stats(file=None):
+    """stats() as a table: what runs natively, what runs as Python, and why."""
+    rows = stats()
+    out = file or sys.stdout
+    if not rows:
+        print('No @optimize function has been called yet.', file=out)
+        return
+    width = max(len(r['function']) for r in rows)
+    print(f'{"function":<{width}}  {"calls":>9}  {"native":>9}  {"python":>9}  dispatch', file=out)
+    for r in rows:
+        print(
+            f'{r["function"]:<{width}}  {r["calls"]:>9}  {r["native_calls"]:>9}  {r["fallback_calls"]:>9}  {r["dispatch"]}',
+            file=out,
+        )
+        for item in r['top_reasons']:
+            print(f'{"":<{width}}    python {item["calls"]}x: {item["reason"]}', file=out)
+
+
+def reset_stats():
+    """Set every function's call counters back to zero (compiled code is kept)."""
+    for item in list(_FUNCTIONS):
+        item.reset_counters()
 
 
 # Toolchain problems affect every function, so they are reported once per process.
@@ -591,7 +683,11 @@ def _unsupported_value(value):
 _I64_MIN = -9223372036854775808
 _I64_MAX = 9223372036854775807
 _MISSING_ATTR = object()
-_ATTRIBUTE_KINDS = ('i64', 'f64', 'bool', 'str', 'bytes', *NUMPY_KINDS)
+_ATTRIBUTE_KINDS = ('i64', 'f64', 'bool', 'str', 'bytes', 'flist', 'ilist', 'slist', *NUMPY_KINDS)
+
+
+def _container_kind(kind):
+    return isinstance(kind, str) and (kind.startswith('dict(') or kind.startswith('set('))
 
 
 def _object_uses(fn):
@@ -602,7 +698,7 @@ def _object_uses(fn):
         return {}
     if not isinstance(node, ast.FunctionDef):
         return {}
-    return attribute_uses(node, list(inspect.signature(fn).parameters))
+    return object_uses(node, list(inspect.signature(fn).parameters))
 
 
 def _read_attribute(value, attr):
@@ -635,18 +731,26 @@ def _read_attribute(value, attr):
     return False, None
 
 
-def _object_kind(value, uses):
-    """'obj(attr:kind,...)' when every attribute the function uses is a plain attribute with
-    a supported value, else None (the call runs as Python)."""
+def _object_kind(value, attrs, methods=()):
+    """'obj(attr:kind,...)' when every attribute the function (and the methods it calls on the
+    object) uses is a plain attribute with a supported value, else None (runs as Python)."""
     cls = type(value)
     if cls.__getattribute__ is not object.__getattribute__:
         return None
-    if any(uses.values()) and cls.__setattr__ is not object.__setattr__:
+    if methods:
+        found = class_object_uses(cls, attrs, methods)
+        if found is None:
+            return None
+        attrs, called = found
+        own = getattr(value, '__dict__', None)
+        if own is not None and any(name in own for name in called):
+            return None  # an instance attribute hides the method
+    if any(attrs.values()) and cls.__setattr__ is not object.__setattr__:
         return None  # frozen dataclasses and custom __setattr__ keep their own rules
     parts = []
-    for attr in sorted(uses):
-        found, item = _read_attribute(value, attr)
-        if not found:
+    for attr in sorted(attrs):
+        found_attr, item = _read_attribute(value, attr)
+        if not found_attr:
             return None
         t = type(item)
         kind = (
@@ -654,10 +758,12 @@ def _object_kind(value, uses):
             if t is int
             else _SCALAR_KINDS.get(t) or kind_of_value(item)
         )
-        if kind not in _ATTRIBUTE_KINDS or (uses[attr] and kind not in ('i64', 'f64')):
+        if not (kind in _ATTRIBUTE_KINDS or _container_kind(kind)):
             return None
-        parts.append((attr, kind))
-    return object_kind(parts)
+        if attrs[attr] and kind not in ('i64', 'f64'):
+            return None
+        parts.append((attr, kind, attrs[attr]))
+    return object_kind(parts, cls if methods else None)
 
 
 class _AttributeCell:
@@ -806,6 +912,7 @@ class _Optimized:
         except Unsupported:
             self.default_kinds = None
         self.wrapper = self.build_wrapper()
+        _FUNCTIONS.add(self)
 
     # ------------------------------------------------------------------ metrics
     def update(self, **values):
@@ -851,6 +958,15 @@ class _Optimized:
             else:
                 first = reason not in self.warned
                 self.warned.add(reason)
+        if first and reason != 'background compilation in progress':
+            logger.info('%s runs as plain Python: %s', fn.__qualname__, reason.splitlines()[0])
+        elif logger.isEnabledFor(logging.DEBUG):
+            logger.debug('%s ran as plain Python: %s', fn.__qualname__, reason.splitlines()[0])
+        for hook in list(_FALLBACK_HOOKS):
+            try:
+                hook(fn.__qualname__, reason)
+            except Exception:  # a broken hook must not change the program's result
+                logger.exception('pyrust_engine fallback hook failed')
         if not self.fallback:
             raise OptimizationError(reason)
         if self.warn_on_fallback and first and reason != 'background compilation in progress':
@@ -923,6 +1039,13 @@ class _Optimized:
                             rebuilt, hit = True, False
                 self.specs[kinds] = native
                 self.install_direct(native)
+                logger.info(
+                    '%s compiled for (%s) in %.2f s%s',
+                    fn.__qualname__,
+                    ', '.join(_type_name(k) if object_parts(k) is None else 'object' for k in kinds),
+                    time.perf_counter() - start,
+                    ' (from cache)' if hit else '',
+                )
                 self.update(
                     backend='rust',
                     reason=None,
@@ -963,6 +1086,21 @@ class _Optimized:
         if isinstance(result, _Failure) and not self.fallback:
             raise OptimizationError(result.reason)
         return self.report()
+
+    def reset_counters(self):
+        with self.metrics_lock:
+            for key in (
+                'native_calls',
+                'fallback_calls',
+                'calls',
+                'native_seconds',
+                'fallback_seconds',
+                'wrapper_seconds',
+            ):
+                self.state[key] = 0 if isinstance(self.state[key], int) else 0.0
+            self.reasons.clear()
+            self.direct_base = -(self.direct_state[0].count if self.direct_state is not None else 0)
+            self.direct_at_reason = 0
 
     def install_direct(self, native):
         """Let CPython call the native code directly for this specialization (numbers, NumPy
@@ -1039,8 +1177,10 @@ class _Optimized:
         objects = []
         for i, (name, value) in enumerate(zip(self.signature.parameters, values)):
             if out[i] is None and name in self.object_uses:
-                out[i] = _object_kind(value, self.object_uses[name])
-                objects.append((value, any(self.object_uses[name].values())))
+                attrs, methods = self.object_uses[name]
+                out[i] = _object_kind(value, attrs, methods)
+                assigned = out[i] is not None and any(w for _, _, w in object_parts(out[i]))
+                objects.append((value, assigned))
         # The same object passed twice, with attributes assigned: Python's order of writes matters.
         for j, (obj, assigned) in enumerate(objects):
             if any(other is obj and (assigned or other_assigned) for other, other_assigned in objects[:j]):

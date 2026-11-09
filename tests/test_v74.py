@@ -49,7 +49,7 @@ class DirectCalls(unittest.TestCase):
         source = Compiler(k.mix).generate()
         self.assertIn('pyrust_py_call', source)
         self.assertIn('pyrust_py_def', source)
-        self.assertNotIn('pyrust_py_call', Compiler(k.middle, kinds={'text': 'str'}).generate())
+        self.assertNotIn('pyrust_py_call', Compiler(k.pieces, kinds={'text': 'str'}).generate())  # returns a dict
 
     def test_same_results_as_python(self):
         cases = [

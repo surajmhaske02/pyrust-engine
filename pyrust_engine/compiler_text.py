@@ -328,10 +328,12 @@ class TextMixin:
             sl = n.slice
             if sl.step is not None and not (isinstance(sl.step, ast.Constant) and sl.step.value in (1, None)):
                 self.fail(n, 'slices with a step are not compiled', 'Loop with range(start, stop, step) instead.')
+            if kind in ('array', 'iarray', 'farray', 'aview', 'iaview', 'faview') and isinstance(base, ast.Name):
+                return None  # a read-only view (Compiler.slice_view)
             if kind in NUMPY_KINDS:
                 self.fail(
                     n,
-                    'NumPy slices are views that share memory, so they are not compiled',
+                    'this NumPy slice is not compiled (a[lo:hi] on 1-D float/int arrays and m[i, :] rows are)',
                     'Loop over indices instead: for i in range(start, stop): ... a[i] ...',
                 )
             lo, hi = self.bound(sl.lower), self.bound(sl.upper)

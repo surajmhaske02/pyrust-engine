@@ -139,7 +139,6 @@ class Compile(unittest.TestCase):
             (mixed_list, None, 'holds'),
             (float_keys, None, 'keys'),
             (set_loop, None, 'sorted(s)'),
-            (numpy_slice, {'a': 'farray'}, 'views'),
             (f32_strong, {'a': 'farray', 'b': 'farray', 'c': 'array'}, 'float32'),
             (float_fstring, None, 'float formatting'),
         ):
